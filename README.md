@@ -13,8 +13,8 @@
 
 Signal board and power board for traic based control.  Includes board power with isolation and 4 triacs.  Signaling board has space for 1 RTD via MAX31865, 2 thermocouples (and internal temperature sensor) via ADS1118, and 2 thermocouples and 4 thermistor probes via MCP3208.  Using MAX31865 temperature for CJC for all thermocouples should be possible due to placement underneath connector.
 
-## TODO:
+## Work to be done
 
-* Create EEPROM image.
-* Update software to support new devices, switch pins, etc.
-* Add support for firebox burnout sensor (purpose of TC1, hotbox TC to see if temp is >setpoint, will require testing temps).  Should be able to run igniter if it is sensed early enough without having to clear out the firebox of pellets or blow the temperature range.
+* TODO: Create EEPROM image.
+* TODO: Update software to support new devices, switch pins, etc.
+* TODO: Add support for firebox burnout sensor (purpose of TC1, hotbox TC to see if temp is >setpoint, will require testing temps).  Should be able to run igniter if it is sensed early enough without having to clear out the firebox of pellets or blow the temperature range.
