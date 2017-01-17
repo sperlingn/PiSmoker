@@ -116,14 +116,6 @@ class MAX31865:
             T = 0
         return T
 
-    def Resistance2Temp(self, R_T):
-        R_0 = self.R_0
-        A = self.A
-        B = self.B
-
-        Tc = (-A + math.sqrt(A*A - 4*B*(1-R_T/R_0)))/(2*B)
-        Tf = Tc*9/5 + 32
-        return Tf
 
     def readFault(self):
         """Rqeusts last fault code from the chip, logs it, and returns value.
