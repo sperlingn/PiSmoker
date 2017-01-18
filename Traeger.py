@@ -6,7 +6,7 @@ logging.config.fileConfig('/home/pi/PiSmoker/logging.conf')
 logger = logging.getLogger(__name__)
 class Traeger:
     Relays = []
-    ToggleTime = { }
+    ToggleTime = {}
     GPIO_Invert = False
 
     def __init__(self, relays, invert=False):
