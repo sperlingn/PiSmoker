@@ -1,7 +1,8 @@
+import logging.config
 import spidev
-import time, math, logging, logging.config
+import time
 
-#Start logging
+# Start logging
 logging.config.fileConfig('/home/pi/PiSmoker/logging.conf')
 logger = logging.getLogger(__name__)
 
@@ -9,29 +10,22 @@ logger = logging.getLogger(__name__)
 faultCodes = {0b10000000: 'Fault SPI %i: RTD High Threshold',
               0b01000000: 'Fault SPI %i: RTD Low Threshold',
               0b00100000: 'Fault SPI %i: REFIN- > 0.85 x V_BIAS',
-              0b0001000: 'Fault SPI %i: REFIN- < 0.85 x V_BIAS (FORCE- Open)',
+              0b0001000:  'Fault SPI %i: REFIN- < 0.85 x V_BIAS (FORCE- Open)',
               0b00001000: 'Fault SPI %i: RTDIN- < 0.85 x V_BIAS (FORCE- Open)',
               0b00000100: 'Fault SPI %i: Overvoltage/undervoltage fault'}
 
-#Datasheet https://datasheets.maximintegrated.com/en/ds/MAX31865.pdf
+
+# Datasheet https://datasheets.maximintegrated.com/en/ds/MAX31865.pdf
 class MAX31865:
-
     # Reference Resistors
-    R_0 = 0. # @param R_0: double
-    R_ref = 0. # @param R_ref: Reference Resistance
-    cs = None # @param cs: Chip select number
-    bus = None # @param bus: SPI bus to be used
-    spi = None # @type spi: spidev
+    R_0 = 0.  # @param R_0: double
+    R_ref = 0.  # @param R_ref: Reference Resistance
+    cs = None  # @param cs: Chip select number
+    bus = None  # @param bus: SPI bus to be used
+    spi = None  # @type spi: spidev
+    fault = None  # @type fault: last fault code
 
-    # Paramameters for RTD correction from IEC 751 (PT100)
-    # Solved for alpha = 0.00385055
-    #RTD Constants
-    A = 3.90830e-3
-    B = -5.775e-7
-    C = 0 # Temp assumed to be above 0C
-
-
-    def __init__(self,cs=0,R_0=None,R_ref=None,ThreeWire=False,bus=0,spi_mode=0b01):
+    def __init__(self, cs=0, R_0=None, R_ref=None, ThreeWire=False, bus=0, spi_mode=0b01):
         """
 
         @param cs: Chip Select
@@ -51,11 +45,11 @@ class MAX31865:
         self.R_0 = R_0
         self.R_ref = R_ref
 
-        self.setupSPI(mode=spi_mode,speed=61000)
+        self.setupSPI(mode=spi_mode, speed=61000)
 
         self.config()
 
-    def setupSPI(self,mode=0b01,speed=7629):
+    def setupSPI(self, mode=0b01, speed=7629):
         """Set up the SPI bus for the parameters set.
 
         @param mode: SPI Mode
@@ -66,19 +60,19 @@ class MAX31865:
         @rtype: None
         """
 
-        #Setup SPI
+        # Setup SPI
         if not mode & 0b01:
             raise TypeError("MAX31865 only supports SPI modes 1 and 3.")
         if speed > 5e6:
             raise TypeError("MAX31865 max SPI clock is 5MHz")
 
         self.spi = spidev.SpiDev()
-        self.spi.open(self.bus,self.cs)
+        self.spi.open(self.bus, self.cs)
         self.spi.max_speed_hz = speed
         self.spi.mode = mode
 
     def config(self):
-        #Config
+        # Config
         # V_Bias (1=on)
         # Conversion Mode (1 = Auto)
         # 1-Shot
@@ -88,42 +82,36 @@ class MAX31865:
         # Fault Status
         # 50/60Hz (0 = 60 Hz)
         if self.ThreeWire:
-            config = 0b11010010 # 0xD2
+            config = 0b11010010  # 0xD2
         else:
-            config = 0b11000010 # 0xC2
+            config = 0b11000010  # 0xC2
 
-        self.spi.xfer2([0x80,config])
+        self.spi.xfer2([0x80, config])
         time.sleep(0.25)
         self.read()
 
     def read(self):
-        MSB = self.spi.xfer2([0x01,0x00])[1]
-        LSB = self.spi.xfer2([0x02,0x00])[1]
+        MSB = self.spi.xfer2([0x01, 0x00])[1]
+        LSB = self.spi.xfer2([0x02, 0x00])[1]
 
-        #Check fault
+        # Check fault
         if LSB & 0b00000001:
-            logger.debug('Fault Detected SPI %i',self.cs)
+            logger.debug('Fault Detected SPI %i', self.cs)
             self.fault = self.readFault()
         else:
             self.fault = None
 
-        ADC = ((MSB<<8) + LSB) >> 1 #Shift MSB up 8 bits, add to LSB, remove fault bit (last bit)
-        R_T = float(ADC * self.R_ref)/(2**15)
-        #print R_T
-        try:
-            T = self.Resistance2Temp(R_T)
-        except:
-            T = 0
-        return T
-
+        ADC = ((MSB << 8) + LSB) >> 1  # Shift MSB up 8 bits, add to LSB, remove fault bit (last bit)
+        R_RTD = float(ADC * self.R_ref) / (2 ** 15)
+        return R_RTD
 
     def readFault(self):
-        """Rqeusts last fault code from the chip, logs it, and returns value.
+        """ Requests last fault code from the chip, logs it, and returns value.
 
         @return: Fault code returned from chip
         @rtype: int
         """
-        Fault = self.spi.xfer2([0x07,0x00])[1]
+        Fault = self.spi.xfer2([0x07, 0x00])[1]
 
         logger.debug(faultCodes[Fault], self.cs)
 
