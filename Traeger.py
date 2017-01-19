@@ -32,3 +32,5 @@ class Traeger:
         self.ToggleTime[relay_id] = time.time()
         GPIO.output(self.Relays[relay_id], state != self.GPIO_Invert)
 
+    def toggle(self, relay_id):
+

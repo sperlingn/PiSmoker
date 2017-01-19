@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 class LCDDisplay(threading.Thread):
     def __init__(self, qP, qT, qR):
-        threading.Thread.__init__(self)
+        super(LCDDisplay,self).__init__()
         try:
             self.lcd = LCD.Adafruit_CharLCDPlate()
         except:
@@ -57,9 +57,6 @@ class LCDDisplay(threading.Thread):
 
 
     def Send2Display(self,text):
-        if self.Display != text:
-            self.Display = text
-            try:
                 self.lcd.clear()
                 self.lcd.message(text)
             except:
@@ -70,6 +67,9 @@ class LCDDisplay(threading.Thread):
         for button in buttons:
             try:
                 if self.lcd.is_pressed(button[0]):
+        if self.Display != text:
+            self.Display = text
+            try:
                     if button[1] == 'Mode':
                         NewMode =  self.GetCurrentMode() + 1
                         if NewMode == len(Modes):

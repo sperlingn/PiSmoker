@@ -4,7 +4,8 @@ import logging.config
 import time
 
 import numpy as np
-from firebase import firebase
+import FB_Handler
+import PiSmoker_Backend
 
 import LCDDisplay
 import MAX31865
@@ -12,413 +13,325 @@ import PID as PID
 import Traeger
 
 # Parameters
-TempInterval = 3  # Frequency to record temperatures
-TempRecord = 60  # Period to record temperatures in memory
-ParametersInterval = 1  # Frequency to write parameters
+FB_URL = 'https://pismoker.firebaseio.com/'
 PIDCycleTime = 20  # Frequency to update control loop
-ReadParametersInterval = 3  # Frequency to poll web for new parameters
-ReadProgramInterval = 60  # Freqnency to poll web for new program
-u_min = 0.15  # Maintenance level
-u_max = 1.0  #
-IgniterTemperature = 100  # Temperature to start igniter
-ShutdownTime = 10 * 60  # Time to run fan after shutdown
+U_MIN = 0.15  # Maintenance level
+U_MAX = 1.0  #
+IGNITER_TEMP = 100  # Temperature to start igniter
+SHUTDOWN_TIME = 10 * 60  # Time to run fan after shutdown
 Relays = {'auger': 22, 'fan': 18, 'igniter': 16}  # Board
-Relays = {'auger': 25, 'fan': 24, 'igniter': 23}  # BCM
-Parameters = {'mode':  'Off', 'target': 225, 'PB': 60.0, 'Ti': 180.0, 'Td': 45.0, 'CycleTime': 20, 'u': 0.15,
-              'PMode': 2.0, 'program': False, 'ProgramToggle': time.time()}  # 60,180,45 held +- 5F
 
-T = None
-"""@type T: list"""
-G = None
-"""@type G: Traeger"""
-qT = None
-"""@type qT: Queue"""
-"""@type qP: Queue"""
-"""@type qR: Queue"""
 logger = None
-qP = None
-qR = None
-Control = None
-"""@type Control: PID"""
-Params = None
-Temps = None
-"""@type Temps: list"""
-firebase_inst = None
 
-def RecordTemps(Parameters, Temps):
-    if len(Temps) == 0 or time.time() - Temps[-1][0] > TempInterval:
-        Ts = [time.time()]
-        for t in T:
-            Ts.append(t.read())
-        Temps.append(Ts)
-        PostTemps(Parameters, Ts)
 
-        # Clean up old temperatures
-        NewTemps = []
-        for Ts in Temps:
-            if time.time() - Ts[0] < TempRecord:  # Still valid
-                NewTemps.append(Ts)
-
-        # Push temperatures to LCD
-        qT.put(Ts)
-
-        return NewTemps
-
-    return Temps
-
-
-def PostTemps(Parameters, Ts):
-    try:
-        r = firebase_inst.post_async('/Temps', {'time': Ts[0] * 1000, 'TT': Parameters['target'], 'T1': Ts[1], 'T2': Ts[2]},
-                                     params=Params, callback=PostCallback)
-    except:
-        logger.info('Error writing Temps to Firebase')
-
-
-def PostCallback(data=None):
-    pass
-
-
-def ResetFirebase(Parameters):
-    try:
-        r = firebase_inst.put('/', 'Parameters', Parameters, params=Params)
-        r = firebase_inst.delete('/', 'Temps', params=Params)
-        r = firebase_inst.delete('/', 'Controls', params=Params)
-        r = firebase_inst.delete('/', 'Program', params=Params)
-    except:
-        logger.info('Error initializing Firebase')
-
-    # Post control state
-    D = {'time': time.time() * 1000, 'u': 0, 'P': 0, 'I': 0, 'D': 0, 'PID': 0, 'Error': 0, 'Derv': 0, 'Inter': 0}
-
-    try:
-        r = firebase_inst.post_async('/Controls', D, params=Params, callback=PostCallback)
-    except:
-        logger.info('Error writing Controls to Firebase')
-
-
-def WriteParameters(Parameters):
-    """Write parameters to file"""
-
-    for r in Relays:
-        Parameters[r] = G.GetState(r)
-
-    Parameters['LastWritten'] = time.time()
-    qP.put(Parameters)
-
-    try:
-        r = firebase_inst.patch_async('/Parameters', Parameters, params=Params, callback=PostCallback)
-    except:
-        logger.info('Error writing parameters to Firebase')
-
-    return Parameters
-
-
-def WriteParameters_sync(Parameters):
-    """Write parameters to file"""
-
-    for r in Relays:
-        Parameters[r] = G.GetState(r)
-
-    Parameters['LastWritten'] = time.time()
-    qP.put(Parameters)
-
-    try:
-        r = firebase_inst.patch('/Parameters', Parameters, params=Params)
-    except:
-        logger.info('Error writing parameters to Firebase')
-
-    return Parameters
-
-
-def ReadParameters(Parameters, Temps, Program):
-    """Read parameters file written by web server and LCD"""
-    # Read from queue
-    while not qR.empty():
-        NewParameters = qR.get()
-        (Parameters, Program) = UpdateParameters(NewParameters, Parameters, Temps, Program)
-
-    # Read from webserver
-    if time.time() - Parameters['LastReadWeb'] > ReadParametersInterval:
-        Parameters['LastReadWeb'] = time.time()
-        try:
-            NewParameters = firebase_inst.get('/Parameters', None)
-            # logger.info('New parameters from firebase: %s',NewParameters)
-            (Parameters, Program) = UpdateParameters(NewParameters, Parameters, Temps, Program)
-        except:
-            logger.info('Error reading parameters from Firebase')
-            return (Parameters, Program)
-
-    return (Parameters, Program)
-
-
-def UpdateParameters(NewParameters, Parameters, Temps, Program):
-    # Loop through each key, see what changed
-    for k in NewParameters.keys():
-        if k == 'target':
-            if float(Parameters[k]) != float(NewParameters[k]):
-                logger.info('New Parameters: %s -- %f (%f)', k, float(NewParameters[k]), Parameters[k])
-                Control.setTarget(float(NewParameters[k]))
-                Parameters[k] = float(NewParameters[k])
-                Parameters = WriteParameters(Parameters)
-        elif k == 'PB' or k == 'Ti' or k == 'Td':
-            if float(Parameters[k]) != float(NewParameters[k]):
-                logger.info('New Parameters: %s -- %f (%f)', k, float(NewParameters[k]), Parameters[k])
-                Parameters[k] = float(NewParameters[k])
-                Control.setGains(Parameters['PB'], Parameters['Ti'], Parameters['Td'])
-                Parameters = WriteParameters(Parameters)
-        elif k == 'PMode':
-            if float(Parameters[k]) != float(NewParameters[k]):
-                logger.info('New Parameters: %s -- %f (%f)', k, float(NewParameters[k]), Parameters[k])
-                Parameters[k] = float(NewParameters[k])
-                Parameters = SetMode(Parameters, Temps)
-                Parameters = WriteParameters(Parameters)
-        elif k == 'mode':
-            if Parameters[k] != NewParameters[k]:
-                logger.info('New Parameters: %s -- %s (%s)', k, NewParameters[k], Parameters[k])
-                Parameters[k] = NewParameters[k]
-                Parameters = SetMode(Parameters, Temps)
-                Parameters = WriteParameters(Parameters)
-        elif k == 'program':
-            if Parameters[k] != NewParameters[k]:
-                logger.info('New Parameters: %s -- %s (%s)', k, NewParameters[k], Parameters[k])
-                Parameters[k] = NewParameters[k]
-                Parameters['LastReadProgram'] = time.time() - 10000
-                Program = GetProgram(Parameters, Program)
-                Parameters = SetProgram(Parameters, Program)
-                break  # Stop processing new parameters
-
-    return (Parameters, Program)
-
-
-def GetAverageSince(Temps, startTime):
-    n = 0
-    sum = [0] * len(Temps[0])
-    for Ts in Temps:
-        if Ts[0] < startTime:
-            continue
-        for i in range(0, len(Ts)):  # Add
-            sum[i] += Ts[i]
-
-        n += 1
-
-    Avg = np.array(sum) / n
-
-    return Avg.tolist()
-
-
-# Modes
-def SetMode(Parameters, Temps):
-    if Parameters['mode'] == 'Off':
-        logger.info('Setting mode to Off')
-        G.Initialize()
-
-    elif Parameters['mode'] == 'Shutdown':
-        G.Initialize()
-        G.SetState('fan', True)
-
-    elif Parameters['mode'] == 'Start':
-        G.SetState('fan', True)
-        G.SetState('auger', True)
-        G.SetState('igniter', True)
-        Parameters['CycleTime'] = 15 + 45
-        Parameters['u'] = 15.0 / (15.0 + 45.0)  # P0
-
-    elif Parameters['mode'] == 'Smoke':
-        G.SetState('fan', True)
-        G.SetState('auger', True)
-        CheckIgniter(Parameters, Temps)
-        On = 15
-        Off = 45 + Parameters['PMode'] * 10  # http://tipsforbbq.com/Definition/Traeger-P-Setting
-        Parameters['CycleTime'] = On + Off
-        Parameters['u'] = On / (On + Off)
-
-    elif Parameters['mode'] == 'Ignite':  # Similar to smoke, with igniter on
-        G.SetState('fan', True)
-        G.SetState('auger', True)
-        G.SetState('igniter', True)
-        On = 15
-        Off = 45 + Parameters['PMode'] * 10  # http://tipsforbbq.com/Definition/Traeger-P-Setting
-        Parameters['CycleTime'] = On + Off
-        Parameters['u'] = On / (On + Off)
-
-    elif Parameters['mode'] == 'Hold':
-        G.SetState('fan', True)
-        G.SetState('auger', True)
-        CheckIgniter(Parameters, Temps)
-        Parameters['CycleTime'] = PIDCycleTime
-        Parameters['u'] = u_min  # Set to maintenance level
-
-    WriteParameters(Parameters)
-    return Parameters
-
-
-def DoMode(Parameters, Temps):
-    if Parameters['mode'] == 'Off':
-        pass
-
-    elif Parameters['mode'] == 'Shutdown':
-        if (time.time() - G.ToggleTime['fan']) > ShutdownTime:
-            Parameters['mode'] = 'Off'
-            Parameters = SetMode(Parameters, Temps)
-
-    elif Parameters['mode'] == 'Start':
-        DoAugerControl(Parameters, Temps)  #
-        G.SetState('igniter', True)
-        if Temps[-1][1] > 115:
-            Parameters['mode'] = 'Hold'
-            Parameters = SetMode(Parameters, Temps)
-
-    elif Parameters['mode'] == 'Smoke':
-        DoAugerControl(Parameters, Temps)
-
-    elif Parameters['mode'] == 'Ignite':
-        DoAugerControl(Parameters, Temps)
-        G.SetState('igniter', True)
-
-    elif Parameters['mode'] == 'Hold':
-        Parameters = DoControl(Parameters, Temps)
-        DoAugerControl(Parameters, Temps)
-
-    return Parameters
-
-
-def DoAugerControl(Parameters, Temps):
-    # Auger currently on AND TimeSinceToggle > Auger On Time
-    if G.GetState('auger') and (time.time() - G.ToggleTime['auger']) > Parameters['CycleTime'] * Parameters['u']:
-        if Parameters['u'] < 1.0:
-            G.SetState('auger', False)
-            WriteParameters(Parameters)
-        CheckIgniter(Parameters, Temps)
-
-    # Auger currently off AND TimeSinceToggle > Auger Off Time
-    if (not G.GetState('auger')) and (time.time() - G.ToggleTime['auger']) > Parameters['CycleTime'] * (
-        1 - Parameters['u']):
-        G.SetState('auger', True)
-        CheckIgniter(Parameters, Temps)
-        WriteParameters(Parameters)
-
-
-def CheckIgniter(Parameters, Temps):
-    # Check if igniter needed
-    if Temps[-1][1] < IgniterTemperature:
-        G.SetState('igniter', True)
-    else:
-        G.SetState('igniter', False)
-
-    # Check if igniter has been running for too long
-    if (time.time() - G.ToggleTime['igniter']) > 1200 and G.GetState('igniter'):
-        logger.info('Disabling igniter due to timeout')
-        G.SetState('igniter', False)
-        Parameters['mode'] = 'Shutdown'
-        Parameters = SetMode(Parameters, Temps)
-
-
-def DoControl(Parameters, Temps):
-    if (time.time() - Control.LastUpdate) > Parameters['CycleTime']:
-
-        Avg = GetAverageSince(Temps, Control.LastUpdate)
-        Parameters['u'] = Control.update(Avg[1])  # Grill probe is [0] in T, [1] in Temps
-        Parameters['u'] = max(Parameters['u'], u_min)
-        Parameters['u'] = min(Parameters['u'], u_max)
-        logger.info('u %f', Parameters['u'])
-
-        # Post control state
-        D = {'time': time.time() * 1000, 'u': Parameters['u'], 'P': Control.P, 'I': Control.I, 'D': Control.D,
-             'PID':  Control.u, 'Error': Control.error, 'Derv': Control.Derv, 'Inter': Control.Inter}
-
-        try:
-            r = firebase_inst.post_async('/Controls', D, params=Params, callback=PostCallback)
-        except:
-            logger.info('Error writing Controls to Firebase')
-
-        Parameters = WriteParameters(Parameters)
-
-    return Parameters
-
-
-def GetProgram(Parameters, Program):
-    if time.time() - Parameters['LastReadProgram'] > ReadProgramInterval and Parameters['program']:
-        try:
-            raw = firebase_inst.get('/Program', None)
-
-            if raw is not None:
-                NewProgram = []
-                for k in sorted(raw.items()):
-                    NewProgram.append(k[1])
-
-                # Check if program is new
-                if Program != NewProgram:
-                    logger.info('Detected new program')
-                    Program = NewProgram
-
-
-        except:
-            logger.info('Error reading Program from Firebase')
-        Parameters['LastReadProgram'] = time.time()
-    return Program
-
-
-def EvaluateTriggers(Parameters, Temps, Program):
-    if Parameters['program'] and len(Program) > 0:
-        P = Program[0]
-
-        if P['trigger'] == 'Time':
-            if time.time() - Parameters['ProgramToggle'] > float(P['triggerValue']):
-                (Parameters, Program) = NextProgram(Parameters, Program)
-
-        elif P['trigger'] == 'MeatTemp':
-            if Temps[-1][2] > float(P['triggerValue']):
-                (Parameters, Program) = NextProgram(Parameters, Program)
-
-    return (Parameters, Program)
-
-
-def NextProgram(Parameters, Program):
-    logger.info('Advancing to next program')
-    Program.pop(0)  # Remove current program
-
-    WriteProgram(Program)
-    if len(Program) > 0:
-        Parameters = SetProgram(Parameters, Program)
-    else:
-        logger.info('Last program reached, disabling program')
-        Parameters['program'] = False
-        Parameters = WriteParameters(Parameters)
-
-    return (Parameters, Program)
-
-
-def SetProgram(Parameters, Program):
-    if len(Program) > 0:
-        Parameters['ProgramToggle'] = time.time()
-
-        P = Program[0]
-        Parameters['mode'] = P['mode']
-        Parameters = SetMode(Parameters, Temps)
-
-        Parameters['target'] = float(P['target'])
-        Control.setTarget(Parameters['target'])
-        Parameters = WriteParameters_sync(Parameters)
-
-    else:
-        logger.info('Last program reached, disabling program')
-        Parameters['program'] = False
-        Parameters = WriteParameters(Parameters)
-
-    return Parameters
-
-
-def WriteProgram(Program):
-    try:
-        r = firebase_inst.delete('/', 'Program', params=Params)
-        for P in Program:
-            r = firebase_inst.post('/Program', P, params=Params)
-    except:
-        logger.info('Error writing Program to Firebase')
-
-
-def main(Parameters, *args, **kwargs):
+class PiSmoker(object):
+    Parameters = None
+    TempInterval = 3  # Frequency to record temperatures
+    TempRecord = 60  # Period to record temperatures in memory
+    db = None  # type: PiSmoker_Backend.PiSmoker_Backend
+    relays = {'auger': 25, 'fan': 24, 'igniter': 23}  # BCM
+    G = None  # type: Traeger.Traeger
+    Program = []
+    qT = qR = qP = None  # type: Queue.Queue
+    Control = None  # type: PID.PID
+    Temps = None  # type: list
+
+    def __init__(self, db, qT=None, qR=None, qP=None, relays=None):
+        """
+
+        @param db: Database backend, expects methods from PiSmoker_Backend
+        @type db: PiSmoker_Backend.PiSmoker_Backend
+        @param relays: [Optional]Dictionary of relay names and GPIO pins
+        @type relays: dict
+        """
+        self.Parameters = {'mode':          'Off', 'target': 225, 'PB': 60.0, 'Ti': 180.0, 'Td': 45.0, 'CycleTime': 20,
+                           'u':             0.15, 'PMode': 2.0, 'program': False,
+                           'ProgramToggle': time.time()}  # 60,180,45 held +- 5F
+        # Initialize Traeger Object
+        if relays:
+            self.relays = relays
+        self.G = Traeger.Traeger(self.relays)
+        self.db = db
+
+        self.qT = qT or Queue.Queue()
+        self.qR = qR or Queue.Queue()
+        self.qP = qP or Queue.Queue()
+        # PID controller based on proportional band in standard PID form https://en.wikipedia.org/wiki/PID_controller#Ideal_versus_standard_PID_form
+        # u = Kp (e(t)+ 1/Ti INT + Td de/dt)
+        # PB = Proportional Band
+        # Ti = Goal of eliminating in Ti seconds (Make large to disable integration)
+        # Td = Predicts error value at Td in seconds
+
+        # Start controller
+        self.Control = PID.PID(self.Parameters['PB'], self.Parameters['Ti'], self.Parameters['Td'])
+        self.Control.setTarget(self.Parameters['target'])
+
+        self.Temps = []
+        # Set mode
+        self.ModeUpdated()
+
+    def RecordTemps(self, T):
+        now = time.time()
+        if not self.Temps or now - self.Temps[-1][0] > self.TempInterval:
+            Ts = [now]
+            for t in T:
+                Ts.append(t.read())
+            self.Temps.append(Ts)
+            self.db.PostTemps(self.Parameters['target'], Ts)
+
+            # TODO: Replace with peek and pop type operations.
+            # Clean up old temperatures
+            NewTemps = []
+            for Ts in self.Temps:
+                if now - Ts[0] < self.TempRecord:  # Still valid
+                    NewTemps.append(Ts)
+
+            # Push temperatures to LCD
+            self.qT.put(Ts)
+
+    def readLCD(self):
+        NewParameters = {}
+        while not self.qR.empty():
+            NewParameters.update(self.qR.get())
+        return NewParameters
+
+    def UpdateParameters(self):
+        # Loop through each key, see what changed
+        NewParameters = self.db.ReadParameters()
+        NewParameters.update(self.readLCD())
+        for k in NewParameters.keys():
+            logger.info('New self.Parameters: %s -- %r (%r)', k, float(NewParameters[k]), self.Parameters[k])
+            if k == 'target':
+                if float(self.Parameters[k]) != float(NewParameters[k]):
+                    self.Control.setTarget(float(NewParameters[k]))
+                    self.Parameters[k] = float(NewParameters[k])
+            elif k in ['PB', 'Ti', 'Td']:
+                if float(self.Parameters[k]) != float(NewParameters[k]):
+                    self.Parameters[k] = float(NewParameters[k])
+                    self.Control.setGains(self.Parameters['PB'], self.Parameters['Ti'], self.Parameters['Td'])
+                    self.db.WriteParameters(self.Parameters)
+            elif k == 'PMode':
+                if float(self.Parameters[k]) != float(NewParameters[k]):
+                    self.Parameters[k] = float(NewParameters[k])
+                    self.ModeUpdated()
+                    self.db.WriteParameters(self.Parameters)
+            elif k == 'mode':
+                if self.Parameters[k] != NewParameters[k]:
+                    self.Parameters[k] = NewParameters[k]
+                    self.ModeUpdated()
+                    self.db.WriteParameters(self.Parameters)
+            elif k == 'program':
+                if self.Parameters[k] != NewParameters[k]:
+                    self.Parameters[k] = NewParameters[k]
+                    self.Parameters['LastReadProgram'] = time.time() - 10000
+                    self.ReadProgram()
+                    self.ProcessProgram()
+                    # TODO: Figure out reason for break after program
+                    # break  # Stop processing new parameters - not sure why?
+        # Write parameters back after all changes have been handled.
+        self.db.WriteParameters(self.Parameters)
+
+    def GetAverageSince(self, startTime):
+        # TODO: Rolling average
+        n = 0
+        sum = [0] * len(self.Temps[0])
+        for Ts in self.Temps:
+            if Ts[0] < startTime:
+                continue
+            for i in range(0, len(Ts)):  # Add
+                sum[i] += Ts[i]
+
+            n += 1
+
+        Avg = np.array(sum) / n
+
+        return Avg.tolist()
+
+    # Modes
+    def ModeUpdated(self):
+        if self.Parameters['mode'] == 'Off':
+            logger.info('Setting mode to Off')
+            self.G.Initialize()
+
+        elif self.Parameters['mode'] == 'Shutdown':
+            self.G.Initialize()
+            self.G.SetState('fan', True)
+
+        elif self.Parameters['mode'] == 'Start':
+            self.G.SetState('fan', True)
+            self.G.SetState('auger', True)
+            self.G.SetState('igniter', True)
+            self.Parameters['CycleTime'] = 15 + 45
+            self.Parameters['u'] = 15.0 / (15.0 + 45.0)  # P0
+
+        elif self.Parameters['mode'] == 'Smoke':
+            self.G.SetState('fan', True)
+            self.G.SetState('auger', True)
+            self.CheckIgniter()
+            On = 15
+            Off = 45 + self.Parameters['PMode'] * 10  # http://tipsforbbq.com/Definition/Traeger-P-Setting
+            self.Parameters['CycleTime'] = On + Off
+            self.Parameters['u'] = On / (On + Off)
+
+        elif self.Parameters['mode'] == 'Ignite':  # Similar to smoke, with igniter on
+            self.G.SetState('fan', True)
+            self.G.SetState('auger', True)
+            self.G.SetState('igniter', True)
+            On = 15
+            Off = 45 + self.Parameters['PMode'] * 10  # http://tipsforbbq.com/Definition/Traeger-P-Setting
+            self.Parameters['CycleTime'] = On + Off
+            self.Parameters['u'] = On / (On + Off)
+
+        elif self.Parameters['mode'] == 'Hold':
+            self.G.SetState('fan', True)
+            self.G.SetState('auger', True)
+            self.CheckIgniter()
+            self.Parameters['CycleTime'] = PIDCycleTime
+            self.Parameters['u'] = U_MIN  # Set to maintenance level
+
+        self.WriteParameters()
+
+    def DoMode(self):
+        now = time.time()
+        if self.Parameters['mode'] == 'Off':
+            pass
+
+        elif self.Parameters['mode'] == 'Shutdown':
+            if (now - self.G.ToggleTime['fan']) > SHUTDOWN_TIME:
+                self.Parameters['mode'] = 'Off'
+                self.ModeUpdated()
+
+        elif self.Parameters['mode'] == 'Start':
+            self.DoAugerControl()
+            self.G.SetState('igniter', True)
+            if self.Temps[-1][1] > 115:
+                self.Parameters['mode'] = 'Hold'
+                self.ModeUpdated()
+
+        elif self.Parameters['mode'] == 'Smoke':
+            self.DoAugerControl()
+
+        elif self.Parameters['mode'] == 'Ignite':
+            self.DoAugerControl()
+            self.G.SetState('igniter', True)
+
+        elif self.Parameters['mode'] == 'Hold':
+            self.DoControl()
+            self.DoAugerControl()
+
+    def WriteParameters(self):
+        """Write parameters to file"""
+
+        for r in self.relays:
+            self.Parameters[r] = self.G.GetState(r)
+
+        self.Parameters['LastWritten'] = time.time()
+        self.qP.put(self.Parameters)
+
+        self.db.WriteParameters(self.Parameters)
+
+    def DoAugerControl(self):
+        # Auger currently on AND TimeSinceToggle > Auger On Time
+        if self.G.GetState('auger') and (time.time() - self.G.ToggleTime['auger']) > self.Parameters['CycleTime'] * self.Parameters['u']:
+            if self.Parameters['u'] < 1.0:
+                self.G.SetState('auger', False)
+                self.WriteParameters()
+            self.CheckIgniter()
+
+        # Auger currently off AND TimeSinceToggle > Auger Off Time
+        if (not self.G.GetState('auger')) and (time.time() - self.G.ToggleTime['auger']) > self.Parameters['CycleTime'] * (
+                    1 - self.Parameters['u']):
+            self.G.SetState('auger', True)
+            self.CheckIgniter()
+            self.WriteParameters()
+
+    def CheckIgniter(self):
+        # Check if igniter needed
+        if self.Temps[-1][1] < IGNITER_TEMP:
+            self.G.SetState('igniter', True)
+        else:
+            self.G.SetState('igniter', False)
+
+        # Check if igniter has been running for too long
+        if (time.time() - self.G.ToggleTime['igniter']) > 1200 and self.G.GetState('igniter'):
+            logger.info('Disabling igniter due to timeout')
+            self.G.SetState('igniter', False)
+            self.Parameters['mode'] = 'Shutdown'
+            self.ModeUpdated()
+
+    def DoControl(self):
+        if (time.time() - self.Control.LastUpdate) > self.Parameters['CycleTime']:
+            # TODO: Replace with stored sliding window average computed as they are updated.
+            Avg = self.GetAverageSince(self.Control.LastUpdate)
+            self.Parameters['u'] = self.Control.update(Avg[1])  # Grill probe is [0] in T, [1] in Temps
+            self.Parameters['u'] = max(self.Parameters['u'], U_MIN)
+            self.Parameters['u'] = min(self.Parameters['u'], U_MAX)
+            logger.info('u %f', self.Parameters['u'])
+
+            # Post control state
+            D = {'time': time.time() * 1000, 'u': self.Parameters['u'], 'P': self.Control.P, 'I': self.Control.I, 'D': self.Control.D,
+                 'PID':  self.Control.u, 'Error': self.Control.error, 'Derv': self.Control.Derv, 'Inter': self.Control.Inter}
+
+            self.db.WriteControl(D)
+
+            self.WriteParameters()
+
+        return self.Parameters
+
+    def ReadProgram(self):
+        # Check if program is new
+        NewProgram = self.db.ReadProgram(self.Parameters['program'])
+        if NewProgram and self.Program != NewProgram:
+            logger.info('Detected new program')
+        self.SetProgram(NewProgram)
+
+    def EvaluateTriggers(self):
+        now = time.time()
+        if self.Parameters['program'] and len(self.Program) > 0:
+            P = self.Program[0]
+
+            if P['trigger'] == 'Time':
+                if now - self.Parameters['ProgramToggle'] > float(P['triggerValue']):
+                    self.NextProgram()
+
+            elif P['trigger'] == 'MeatTemp':
+                if self.Temps[-1][2] > float(P['triggerValue']):
+                    self.NextProgram()
+
+    def NextProgram(self):
+        logger.info('Advancing to next program')
+        self.Program.pop(0)  # Remove current program
+
+        self.db.WriteProgram(self.Program)
+        if len(self.Program) > 0:
+            self.ProcessProgram()
+        else:
+            logger.info('Last program reached, disabling program')
+            self.Parameters['program'] = False
+            self.WriteParameters()
+
+    def ProcessProgram(self):
+        if len(self.Program) > 0:
+            self.Parameters['ProgramToggle'] = time.time()
+
+            P = self.Program[0]
+            self.Parameters['mode'] = P['mode']
+            self.ModeUpdated()
+
+            self.Parameters['target'] = float(P['target'])
+            self.Control.setTarget(self.Parameters['target'])
+            self.WriteParameters()
+
+        else:
+            logger.info('Last program reached, disabling program')
+            self.Parameters['program'] = False
+            self.WriteParameters()
+
+    def SetProgram(self, Program):
+        self.Program = Program
+        self.ProcessProgram()
+
+def main(*args, **kwargs):
     # Start logging
     logging.config.fileConfig('/home/pi/PiSmoker/logging.conf')
     logger = logging.getLogger('PiSmoker')
@@ -428,18 +341,6 @@ def main(Parameters, *args, **kwargs):
     T.append(MAX31865.MAX31865(1, 1000, 4000, False))  # Grill
     T.append(MAX31865.MAX31865(0, 100, 400, True))  # Meat
 
-    # Initialize Traeger Object
-    G = Traeger.Traeger(Relays)
-
-    # PID controller based on proportional band in standard PID form https://en.wikipedia.org/wiki/PID_controller#Ideal_versus_standard_PID_form
-    # u = Kp (e(t)+ 1/Ti INT + Td de/dt)
-    # PB = Proportional Band
-    # Ti = Goal of eliminating in Ti seconds (Make large to disable integration)
-    # Td = Predicts error value at Td in seconds
-
-    # Start controller
-    Control = PID.PID(Parameters['PB'], Parameters['Ti'], Parameters['Td'])
-    Control.setTarget(Parameters['target'])
 
     # Start firebase
     f = open('/home/pi/PiSmoker/AuthToken.txt', 'r')
@@ -447,13 +348,12 @@ def main(Parameters, *args, **kwargs):
     f.close()
     Params = {'print': 'silent'}
     Params = {'auth': Secret, 'print': 'silent'}  # ".write": "auth !== null"
-    firebase_inst = firebase.FirebaseApplication('https://pismoker.firebaseio.com/')
+    firebase_db = FB_Handler.Firebase_Backend(FB_URL, Secret)
 
     # Initialize LCD
     qP = Queue.Queue()  # Queue for Parameters
     qT = Queue.Queue()  # Queue for Temps
     qR = Queue.Queue()  # Return for Parameters
-    qP.put(Parameters)
     qT.put([0, 0, 0])
     lcd = LCDDisplay.LCDDisplay(qP, qT, qR)
     lcd.setDaemon(True)
@@ -464,17 +364,13 @@ def main(Parameters, *args, **kwargs):
     ##############
 
     # Default parameters
-    Parameters = WriteParameters(Parameters)
+    Smoker = PiSmoker(firebase_db)
 
     # Setup variables
-    Temps = []  # List, [time, T[0], T[1]...]
+    Temps = []  # type: [[time, T[0], T[1],...],...]
     Program = []
-    ResetFirebase(Parameters)
-    Parameters['LastReadProgram'] = time.time()
-    Parameters['LastReadWeb'] = time.time()
-
-    # Set mode
-    SetMode(Parameters, Temps)
+    #Parameters['LastReadProgram'] = time.time()
+    #Parameters['LastReadWeb'] = time.time()
 
     ###############
     # Main Loop    #
@@ -483,19 +379,19 @@ def main(Parameters, *args, **kwargs):
     try:
         while 1:
             # Record temperatures
-            Temps = RecordTemps(Parameters, Temps)
+            Smoker.RecordTemps(Temps)
 
             # Check for new parameters
-            (Parameters, Program) = ReadParameters(Parameters, Temps, Program)
+            Smoker.UpdateParameters()
 
             # Check for new program
-            Program = GetProgram(Parameters, Program)
+            Smoker.ProcessProgram()
 
             # Evaluate triggers
-            (Parameters, Program) = EvaluateTriggers(Parameters, Temps, Program)
+            Smoker.EvaluateTriggers()
 
             # Do mode
-            Parameters = DoMode(Parameters, Temps)
+            Smoker.DoMode()
 
             time.sleep(0.05)
     except KeyboardInterrupt:
@@ -508,8 +404,9 @@ def main(Parameters, *args, **kwargs):
             G.SetState(relay_id=relay, state=False)
         return retval
 
+
 if __name__ == '__main__':
     import sys
 
-    retval = main(Parameters=Parameters)
+    retval = main()
     sys.exit(retval)

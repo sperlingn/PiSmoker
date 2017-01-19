@@ -184,7 +184,9 @@ class Thermocouple(object):
 
 # noinspection SpellCheckingInspection
 class TemperatureProbe(object):
-    temp_in_F = True
+    # TODO: Sliding window temperature log.
+    # As a new temperature is added, remove the last one in the window. FIFO queue?
+    temp_in_F = False
     type = None
 
     tc_type = 'K'
@@ -199,7 +201,7 @@ class TemperatureProbe(object):
     R_0_RTD = R_0_PT1000
 
     def __init__(self, probe_type, read_fn, read_fn_args=None, read_cj_fn=None, read_cj_fn_args=None, subtype=None,
-                 thermis_fn=None, thermis_fn_args=None, **kwargs):
+                 thermis_fn=None, thermis_fn_args=None, temp_in_F=None, **kwargs):
         """
 
         @param probe_type: Probe type, recognizes: [RTD, THERMISTOR, THERMOCOUPLE] (['RTD', 'TR', 'TC'])
@@ -273,6 +275,9 @@ class TemperatureProbe(object):
                     self.read_fn = partial(self.read_fn, read_fn_args)
 
         self.type = probe_type
+
+        if temp_in_F is not None:
+            self.temp_in_F = temp_in_F
 
     def _read_RTD(self):
         return self.rtd_conversion(self.read_fn())
