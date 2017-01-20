@@ -10,10 +10,10 @@ VALID_PROBE_TYPES = [RTD, THERMISTOR, THERMOCOUPLE]
 # Parameters for RTD correction from IEC 751 (PT100)
 # Solved for alpha = 0.00385055
 # RTD Constants
-A_PT = 3.90830e-3
-B_PT = -5.775e-7
-R_0_PT100 = 100.
-R_0_PT1000 = 1000.
+_A_PT = 3.90830e-3
+_B_PT = -5.775e-7
+_R_0_PT100 = 100.
+_R_0_PT1000 = 1000.
 
 
 class Thermocouple(object):
@@ -198,7 +198,7 @@ class TemperatureProbe(object):
     read_cj_fn = None  # Function used to read Cold Junction temperature for thermocouple
     thermis_fn = None  # Arbitrary voltage to temperature function for thermistors
 
-    R_0_RTD = R_0_PT1000
+    R_0_RTD = _R_0_PT1000
 
     def __init__(self, probe_type, read_fn, read_fn_args=None, read_cj_fn=None, read_cj_fn_args=None, subtype=None,
                  thermis_fn=None, thermis_fn_args=None, temp_in_F=None, **kwargs):
@@ -256,13 +256,14 @@ class TemperatureProbe(object):
                     self.thermis_fn = partial(self.thermis_fn, thermis_fn_args)
         elif probe_type is RTD and subtype is not None:
             if subtype == 'PT100':
-                self.R_0 = R_0_PT100
+                self.R_0 = _R_0_PT100
             elif subtype == 'PT1000':
-                self.R_0 = R_0_PT1000
+                self.R_0 = _R_0_PT1000
             else:
                 self.R_0 = float(subtype)
 
         if not callable(read_fn):
+            assert callable(read_fn)
             raise TypeError("read_fn must be a callable object")
         else:
             self.read_fn = read_fn
@@ -296,7 +297,7 @@ class TemperatureProbe(object):
 
     def rtd_conversion(self, R_T):
         # Use NIST RTD Linearization function.
-        Tc = (-A_PT + sqrt(A_PT * A_PT - 4 * B_PT * (1 - R_T / self.R_0))) / (2 * B_PT)
+        Tc = (-_A_PT + sqrt(_A_PT * _A_PT - 4 * _B_PT * (1 - R_T / self.R_0))) / (2 * _B_PT)
         return Tc
 
     def read(self, temp_in_F=None):

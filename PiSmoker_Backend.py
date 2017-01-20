@@ -1,6 +1,6 @@
 class PiSmoker_Backend(object):
     """
-    Interface class for all backends.  They must all support these bare minimum Functions and Signatures
+    Interface class for all back ends.  They must all support these bare minimum Functions and Signatures
 
     * Private variables:
     @param _polling_interval: Frequency to poll for new parameters in seconds
@@ -17,12 +17,13 @@ class PiSmoker_Backend(object):
     _last_read_program = None
     _last_write_control = None
     _last_read_control = None
-    _read_program_interval = 60  # Freqnency to poll web for new program
+    _read_program_interval = 60  # Frequency to poll web for new program
 
     def __init__(self, *args, **kwargs):
         raise NotImplementedError("Template class, must be implemented.")
 
-    def PostTemps(self, target_temp, Ts):
+    @staticmethod
+    def PostTemps(target_temp, Ts):
         """Expected to implement storing the temperatures in the backend.
         PiSmoker_Backend implementation
 
@@ -34,7 +35,7 @@ class PiSmoker_Backend(object):
         @rtype: dict
         """
         T = {'time': Ts[0] * 1000, 'TT': target_temp}
-        T.update({'T%i'%i: t for (i, t) in enumerate(Ts[1:], 1)})
+        T.update({'T%i' % i: t for (i, t) in enumerate(Ts[1:], 1)})
         return T
 
     def WriteParameters(self, Parameters):

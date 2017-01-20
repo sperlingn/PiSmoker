@@ -1,34 +1,34 @@
+import logging.config
 import spidev
-import time, math, logging, logging.config
 
-#Start logging
+# Start logging
 logging.config.fileConfig('/home/pi/PiSmoker/logging.conf')
 logger = logging.getLogger(__name__)
 
-#Datasheet https://datasheets.maximintegrated.com/en/ds/MCP320X.pdf
+
+# Datasheet https://datasheets.maximintegrated.com/en/ds/MCP320X.pdf
 
 
 class MCP320X(object):
+    V_ref = 0.  # @param R_ref: Reference Voltage
+    __cs = None  # @param cs: Chip select number
+    __bus = None  # @param bus: SPI bus to be used
+    __spi = None  # @type spi: spidev
+    __channels = None  # @type channels: dict
 
-    V_ref = 0. # @param R_ref: Reference Voltage
-    cs = None # @param cs: Chip select number
-    bus = None # @param bus: SPI bus to be used
-    spi = None # @type spi: spidev
-    channels = None # @type channels: dict
-
-    def __init__(self,bus=0,cs=0,spi_mode=0b11):
+    def __init__(self, bus=0, cs=0, spi_mode=0b11):
         """
 
         @param cs: Chip Select
         @type cs: int
 
         """
-        self.cs = cs
-        self.bus = bus
+        self.__cs = cs
+        self.__bus = bus
 
-        self.setupSPI(mode=spi_mode,speed=61000)
+        self.setupSPI(mode=spi_mode, speed=61000)
 
-    def setupSPI(self,mode=0b11,speed=7629):
+    def setupSPI(self, mode=0b11, speed=7629):
         """Set up the SPI bus for the parameters set.
 
         @param mode: SPI Mode
@@ -39,7 +39,7 @@ class MCP320X(object):
         @rtype: None
         """
 
-        #Setup SPI
+        # Setup SPI
         if not mode & 0b11 == 0b11 or mode & 0b11 == 0b00:
             raise TypeError("MCP320X only supports SPI modes 0 and 3.")
         if speed <= 10e3:
@@ -47,12 +47,12 @@ class MCP320X(object):
         if speed > 5e6:
             raise TypeError("MCP320X max SPI clock is 5MHz.")
 
-        self.spi = spidev.SpiDev()
-        self.spi.open(self.bus,self.cs)
-        self.spi.max_speed_hz = speed
-        self.spi.mode = mode
+        self.__spi = spidev.SpiDev()
+        self.__spi.open(self.__bus, self.__cs)
+        self.__spi.max_speed_hz = speed
+        self.__spi.mode = mode
 
-    def read(self,channel=0):
+    def read(self, channel=0):
         """ Perform single-ended ADC read.
 
         @param channel: Channel to read (0-7)
@@ -77,43 +77,43 @@ class MCP320X(object):
         #         bit 5-8=? ; Most significant 4 bits of reading
         # Byte 3: bit 1-8=? ; Remaining 8 bits of reading
 
-        if channel not in self.channels:
+        if channel not in self.__channels:
             raise TypeError("Channel %s not configured as input channel." % channel)
         else:
-            cid = self.channels[channel]
+            cid = self.__channels[channel]
 
         read_command = [(0b1 << 2 | (cid & 0b1100) >> 2),
                         ((0b11 & cid) << 6),
                         0x00]
 
-        reading = self.spi.xfer2(read_command)
+        reading = self.__spi.xfer2(read_command)
 
         ADC = ((reading[1] & 0b1111) << 8) + reading[2]  # Shift MSB up 8 bits, add to LSB
-        v_in = float(ADC * self.V_ref)/4096.
+        v_in = float(ADC * self.V_ref) / 4096.
         return v_in
 
     def close(self):
-        self.spi.close()
+        self.__spi.close()
 
 
 class MCP3208(MCP320X):
     # Channel Setup:      0bD210 for bit S/D, D2, D1, D0
-    channels = {0: 0b1000,
-                1: 0b1001,
-                2: 0b1010,
-                3: 0b1011,
-                4: 0b1100,
-                5: 0b1101,
-                6: 0b1110,
-                7: 0b1111,
-             '01': 0b0000,
-             '10': 0b0001,
-             '23': 0b0010,
-             '32': 0b0011,
-             '45': 0b0100,
-             '54': 0b0101,
-             '67': 0b0110,
-             '76': 0b0111}
+    __channels = {0:    0b1000,
+                  1:    0b1001,
+                  2:    0b1010,
+                  3:    0b1011,
+                  4:    0b1100,
+                  5:    0b1101,
+                  6:    0b1110,
+                  7:    0b1111,
+                  '01': 0b0000,
+                  '10': 0b0001,
+                  '23': 0b0010,
+                  '32': 0b0011,
+                  '45': 0b0100,
+                  '54': 0b0101,
+                  '67': 0b0110,
+                  '76': 0b0111}
 
     def __init__(self, channels=None, *args, **kwargs):
         super(MCP3208, self).__init__(*args, **kwargs)

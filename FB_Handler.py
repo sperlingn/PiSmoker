@@ -7,12 +7,13 @@ logging.config.fileConfig('/home/pi/PiSmoker/logging.conf')
 logger = logging.getLogger(__name__)
 
 
+# noinspection PyBroadException
 class Firebase_Backend(PiSmoker_Backend):
     firebase_inst = None
     """@type self.firebase_inst: firebase"""
     fb_params = {'print': 'silent'}
     _polling_interval = 3  # Frequency to poll web for new parameters
-    _read_program_interval = 60  # Freqnency to poll web for new program
+    _read_program_interval = 60  # Frequency to poll web for new program
 
     _last_write_parameters = time()
     _last_read_parameters = time()
@@ -21,14 +22,18 @@ class Firebase_Backend(PiSmoker_Backend):
     _last_write_control = time()
     _last_read_control = time()
     _do_async = True
+    _init_args = None
+    _init_kwargs = None
 
     def __init__(self, app_url, auth_secret, async=True, *args, **kwargs):
         auth = FirebaseAuthentication(secret=auth_secret, email=None)
         self.firebase_inst = FirebaseApplication(app_url, authentication=auth)
         self._do_async = async
+        self._init_args = args
+        self._init_kwargs = kwargs
 
     def PostTemps(self, target_temp, Ts):
-        T = super(Firebase_Backend,self).PostTemps(target_temp, Ts)
+        T = super(Firebase_Backend, self).PostTemps(target_temp, Ts)
         try:
             return self.firebase_inst.post_async('/Temps', T, params=self.fb_params, callback=self.PostCallback)
         except:
@@ -40,10 +45,10 @@ class Firebase_Backend(PiSmoker_Backend):
 
     def ResetFirebase(self, Parameters):
         try:
-            r = self.firebase_inst.put('/', 'Parameters', Parameters, params=self.fb_params)
-            r = self.firebase_inst.delete('/', 'Temps', params=self.fb_params)
-            r = self.firebase_inst.delete('/', 'Controls', params=self.fb_params)
-            r = self.firebase_inst.delete('/', 'Program', params=self.fb_params)
+            self.firebase_inst.put('/', 'Parameters', Parameters, params=self.fb_params)
+            self.firebase_inst.delete('/', 'Temps', params=self.fb_params)
+            self.firebase_inst.delete('/', 'Controls', params=self.fb_params)
+            self.firebase_inst.delete('/', 'Program', params=self.fb_params)
         except:
             logger.info('Error initializing Firebase')
 
@@ -51,7 +56,7 @@ class Firebase_Backend(PiSmoker_Backend):
         D = {'time': time() * 1000, 'u': 0, 'P': 0, 'I': 0, 'D': 0, 'PID': 0, 'Error': 0, 'Derv': 0, 'Inter': 0}
 
         try:
-            r = self.firebase_inst.post_async('/Controls', D, params=self.fb_params, callback=self.PostCallback)
+            self.firebase_inst.post_async('/Controls', D, params=self.fb_params, callback=self.PostCallback)
         except:
             logger.info('Error writing Controls to Firebase')
             return -1
@@ -60,7 +65,7 @@ class Firebase_Backend(PiSmoker_Backend):
         """Write parameters to file"""
         try:
             return self.firebase_inst.patch_async('/Parameters', Parameters, params=self.fb_params,
-                                               callback=self.PostCallback)
+                                                  callback=self.PostCallback)
         except:
             logger.info('Error writing parameters to Firebase')
             return -1
@@ -85,13 +90,13 @@ class Firebase_Backend(PiSmoker_Backend):
         # Read from queue
         now = time()
 
-        # Read from webserver
+        # Read from web server
         if now > self._last_read_parameters + self._polling_interval:
             self._last_read_parameters = now
             try:
                 return self.firebase_inst.get('/Parameters', None)
                 # logger.info('New parameters from firebase: %s',NewParameters)
-                #(Parameters, Program) = UpdateParameters(NewParameters, Parameters, Temps, Program)
+                # (Parameters, Program) = UpdateParameters(NewParameters, Parameters, Temps, Program)
             except:
                 logger.info('Error reading parameters from Firebase')
                 return {}
@@ -106,9 +111,9 @@ class Firebase_Backend(PiSmoker_Backend):
 
     def WriteProgram(self, Program):
         try:
-            r = self.firebase_inst.delete('/', 'Program', params=self.fb_params)
+            self.firebase_inst.delete('/', 'Program', params=self.fb_params)
             for P in Program:
-                r = self.firebase_inst.post('/Program', P, params=self.fb_params)
+                self.firebase_inst.post('/Program', P, params=self.fb_params)
         except:
             logger.info('Error writing Program to Firebase')
 
@@ -117,8 +122,6 @@ class Firebase_Backend(PiSmoker_Backend):
 
         @param run_program:
         @type run_program: bool
-        @param Program:
-        @type Program: []
         @return:
         @rtype: []
         """
