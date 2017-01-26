@@ -18,3 +18,4 @@ Signal board and power board for traic based control.  Includes board power with
 * TODO: Create EEPROM image.
 * TODO: Update software to support new devices, switch pins, etc.
 * TODO: Add support for firebox burnout sensor (purpose of TC1, hotbox TC to see if temp is >setpoint, will require testing temps).  Should be able to run igniter if it is sensed early enough without having to clear out the firebox of pellets or blow the temperature range.
+* TODO: Add parsing of EEPROM settings.

@@ -1,18 +1,15 @@
 from Queue import Queue
+from collections import deque
 from logging import getLogger, config
 from time import sleep, time
 
-from numpy import array
-
-from PiSmoker_Backend import PiSmoker_Backend
+from ADS1118 import ADS1118
 from FB_Handler import Firebase_Backend
 from LCDDisplay import LCDDisplay
-
 from MAX31865 import MAX31865
-from ADS1118 import ADS1118
-from TemperatureProbe import TemperatureProbe, RTD, THERMISTOR, THERMOCOUPLE
-
 from PID import PID
+from PiSmoker_Backend import PiSmoker_Backend
+from TemperatureProbe import TemperatureProbe, RTD, THERMOCOUPLE
 from Traeger import Traeger
 
 FB_URL = 'https://pismoker.firebaseio.com/'
@@ -20,15 +17,104 @@ PIDCycleTime = 20  # Frequency to update control loop
 U_MIN = 0.15  # Maintenance level
 U_MAX = 1.0  #
 IGNITER_TEMP = 100  # Temperature to start igniter
+STARTUP_TEMP = 115
 SHUTDOWN_TIME = 10 * 60  # Time to run fan after shutdown
+TEMP_INTERVAL = 3  # Frequency to record temperatures
+
 
 _BUS = 1
 _MAX_CS = 0
 _ADS_CS = 1
 _MCS_CS = 2
-# Relays = {'auger': 22, 'fan': 18, 'igniter': 16}  # Board
+_RELAYS = {'auger': None, 'fan': None, 'igniter': None}  # BCM
 
-logger = None
+# Start logging
+config.fileConfig('/home/pi/PiSmoker/logging.conf')
+_logger = getLogger(__name__)
+
+
+# noinspection SpellCheckingInspection
+class Temperature_Record(deque):
+    _average = None
+
+    def __init__(self, *args, **kwargs):
+        super(Temperature_Record, self).__init__(*args, **kwargs)
+        if len(self) > 0:
+            self._update_average()
+
+    def _update_average(self):
+        if len(self) > 0:
+            try:
+                try:
+                    self._average = {key: 0 for key in self[0]}
+                    n = len(self) * 1.
+                    for item in self:
+                        for key in self._average:
+                            self._average[key] += (item[key] / n)
+                except LookupError or ValueError:
+                    self._average = sum(self) / len(self)
+            except StandardError:
+                self._average = None
+        else:
+            self._average = None
+
+    def average(self):
+        return self._average
+
+    def append(self, *args, **kwargs):
+        to_return = super(Temperature_Record, self).append(*args, **kwargs)
+        self._update_average()
+        return to_return
+
+    def appendleft(self, *args, **kwargs):
+        to_return = super(Temperature_Record, self).appendleft(*args, **kwargs)
+        self._update_average()
+        return to_return
+
+    def popleft(self, *args, **kwargs):
+        to_return = super(Temperature_Record, self).popleft(*args, **kwargs)
+        self._update_average()
+        return to_return
+
+    def pop(self, *args, **kwargs):
+        to_return = super(Temperature_Record, self).pop(*args, **kwargs)
+        self._update_average()
+        return to_return
+
+    def extendleft(self, *args, **kwargs):
+        to_return = super(Temperature_Record, self).extendleft(*args, **kwargs)
+        self._update_average()
+        return to_return
+
+    def extend(self, *args, **kwargs):
+        to_return = super(Temperature_Record, self).extend(*args, **kwargs)
+        self._update_average()
+        return to_return
+
+    def __delitem__(self, y):
+        to_return = super(Temperature_Record, self).__delitem__(y)
+        self._update_average()
+        return to_return
+
+    def clear(self, *args, **kwargs):
+        to_return = super(Temperature_Record, self).clear(*args, **kwargs)
+        self._update_average()
+        return to_return
+
+    def remove(self, value):
+        to_return = super(Temperature_Record, self).remove(value)
+        self._update_average()
+        return to_return
+
+    def __iadd__(self, y):
+        to_return = super(Temperature_Record, self).__iadd__(y)
+        self._update_average()
+        return to_return
+
+    def __setitem__(self, i, y):
+        to_return = super(Temperature_Record, self).__setitem__(i, y)
+        self._update_average()
+        return to_return
 
 
 class PiSmoker_Parameters(dict):
@@ -51,15 +137,14 @@ class PiSmoker_Parameters(dict):
 
 class PiSmoker(object):
     Parameters = None  # type: PiSmoker_Parameters
-    TempInterval = 3  # Frequency to record temperatures
     TempRecord = 60  # Period to record temperatures in memory
     db = None  # type: PiSmoker_Backend
-    relays = {'auger': 25, 'fan': 24, 'igniter': 23}  # BCM
     G = None  # type: Traeger
     Program = []
     qT = qR = qP = None  # type: Queue
     Control = None  # type: PID
-    Temps = None  # type: list
+    Temps = None  # type: Temperature_Record
+    relays = None
 
     def __init__(self, db, qT=None, qR=None, qP=None, relays=None):
         """
@@ -70,18 +155,21 @@ class PiSmoker(object):
         @type relays: dict
         """
         self.Parameters = PiSmoker_Parameters(
-                {'mode':  'Off', 'target': 225, 'PB': 60.0, 'Ti': 180.0, 'Td': 45.0, 'CycleTime': 20, 'u': 0.15,
-                 'PMode': 2.0, 'program': False, 'ProgramToggle': time()},
+                {'mode':  'Off', 'target': 225, 'PB': 60.0, 'Ti': 180.0, 'Td': 45.0, 'CycleTime': PIDCycleTime,
+                 'u': U_MIN, 'PMode': 2.0, 'program': False, 'ProgramToggle': time()},
                 __setter_callback__=self.ParameterUpdateCallback)  # 60,180,45 held +- 5F
         # Initialize Traeger Object
         if relays:
             self.relays = relays
+        else:
+            self.relays = _RELAYS
         self.G = Traeger(self.relays)
         self.db = db
 
         self.qT = qT or Queue()
         self.qR = qR or Queue()
         self.qP = qP or Queue()
+
         # PID controller based on proportional band in standard PID form
         # https://en.wikipedia.org/wiki/PID_controller#Ideal_versus_standard_PID_form
         # u = Kp (e(t)+ 1/Ti INT + Td de/dt)
@@ -93,11 +181,11 @@ class PiSmoker(object):
         self.Control = PID(self.Parameters['PB'], self.Parameters['Ti'], self.Parameters['Td'])
         self.Control.setTarget(self.Parameters['target'])
 
-        self.Temps = []
+        self.Temps = Temperature_Record()
         # Set mode
         self.ModeUpdated()
 
-    def RecordTemps(self, probe_list):
+    def UpdateTemps(self, probe_list):
         """
 
         @param probe_list: List of probes which provide the read() function to get the temperature.
@@ -106,18 +194,18 @@ class PiSmoker(object):
         @rtype:
         """
         now = time()
-        if not self.Temps or now - self.Temps[-1][0] > self.TempInterval:
+        if not self.Temps or now - self.Temps[-1]['time'] > TEMP_INTERVAL:
             Ts = {'time': now}
             Ts.update({probe: probe_list[probe].read() for probe in probe_list})
             self.Temps.append(Ts)
             self.db.PostTemps(self.Parameters['target'], Ts)
 
-            # TODO: Replace with peek and pop type operations.
             # Clean up old temperatures
-            NewTemps = []
-            for Ts in self.Temps:
-                if now - Ts[0] < self.TempRecord:  # Still valid
-                    NewTemps.append(Ts)
+            while len(self.Temps) > 0:
+                if now - self.Temps[0]['time'] < self.TempRecord:  # Still valid
+                    self.Temps.popleft()
+                else:
+                    break
 
             # Push temperatures to LCD
             self.qT.put(Ts)
@@ -129,7 +217,7 @@ class PiSmoker(object):
         return NewParameters
 
     def ParameterUpdateCallback(self, parameter, value):
-        logger.info('New Parameters: %s -- %r (%r)', parameter, float(value), self.Parameters[parameter])
+        _logger.info('New Parameters: %s -- %r (%r)', parameter, float(value), self.Parameters[parameter])
         if parameter == 'target':
             self.Control.setTarget(float(value))
         elif parameter in ['PB', 'Ti', 'Td']:
@@ -151,7 +239,7 @@ class PiSmoker(object):
         NewParameters = self.db.ReadParameters()
         NewParameters.update(self.readLCD())
         for k in NewParameters.keys():
-            logger.info('New self.Parameters: %s -- %r (%r)', k, float(NewParameters[k]), self.Parameters[k])
+            _logger.info('New self.Parameters: %s -- %r (%r)', k, float(NewParameters[k]), self.Parameters[k])
             if k in ['target', 'PB', 'Ti', 'Td', 'PMode']:
                 if float(self.Parameters[k]) != float(NewParameters[k]):
                     self.Parameters[k] = float(NewParameters[k])
@@ -165,26 +253,21 @@ class PiSmoker(object):
                     # TODO: Figure out reason for break after program
                     # break  # Stop processing new parameters - not sure why?
 
-    def GetAverageSince(self, startTime):
+    def GetAverageSince(self, startTime, probe='grill'):
         # TODO: Rolling average
         n = 0
-        sum = [0] * len(self.Temps[0])
+        total = 0
         for Ts in self.Temps:
-            if Ts[0] < startTime:
+            if Ts['time'] < startTime:
                 continue
-            for i in range(0, len(Ts)):  # Add
-                sum[i] += Ts[i]
-
+            total += Ts[probe]
             n += 1
-
-        Avg = array(sum) / n
-
-        return Avg.tolist()
+        return total / n
 
     # Modes
     def ModeUpdated(self):
         if self.Parameters['mode'] == 'Off':
-            logger.info('Setting mode to Off')
+            _logger.info('Setting mode to Off')
             self.G.Initialize()
 
         elif self.Parameters['mode'] == 'Shutdown':
@@ -238,7 +321,7 @@ class PiSmoker(object):
         elif self.Parameters['mode'] == 'Start':
             self.DoAugerControl()
             self.G.SetState('igniter', True)
-            if self.Temps[-1][1] > 115:
+            if self.Temps[-1]['grill'] > STARTUP_TEMP:
                 self.Parameters['mode'] = 'Hold'
                 self.ModeUpdated()
 
@@ -283,26 +366,24 @@ class PiSmoker(object):
 
     def CheckIgniter(self):
         # Check if igniter needed
-        if self.Temps[-1][1] < IGNITER_TEMP:
+        # TODO: Update igniter check code
+        if self.Temps[-1]['grill'] < IGNITER_TEMP:
             self.G.SetState('igniter', True)
         else:
             self.G.SetState('igniter', False)
 
         # Check if igniter has been running for too long
         if (time() - self.G.ToggleTime['igniter']) > 1200 and self.G.GetState('igniter'):
-            logger.info('Disabling igniter due to timeout')
+            _logger.info('Disabling igniter due to timeout')
             self.G.SetState('igniter', False)
             self.Parameters['mode'] = 'Shutdown'
             self.ModeUpdated()
 
     def DoControl(self):
         if (time() - self.Control.LastUpdate) > self.Parameters['CycleTime']:
-            # TODO: Replace with stored sliding window average computed as they are updated.
             Avg = self.GetAverageSince(self.Control.LastUpdate)
-            self.Parameters['u'] = self.Control.update(Avg[1])  # Grill probe is [0] in T, [1] in Temps
-            self.Parameters['u'] = max(self.Parameters['u'], U_MIN)
-            self.Parameters['u'] = min(self.Parameters['u'], U_MAX)
-            logger.info('u %f', self.Parameters['u'])
+            self.Parameters['u'] = min(max(self.Control.update(Avg), U_MIN), U_MAX)
+            _logger.info('u %f', self.Parameters['u'])
 
             # Post control state
             D = {'time':  time() * 1000, 'u': self.Parameters['u'], 'P': self.Control.P, 'I': self.Control.I,
@@ -320,7 +401,7 @@ class PiSmoker(object):
         # Check if program is new
         NewProgram = self.db.ReadProgram(self.Parameters['program'])
         if NewProgram and self.Program != NewProgram:
-            logger.info('Detected new program')
+            _logger.info('Detected new program')
         self.SetProgram(NewProgram)
 
     def EvaluateTriggers(self):
@@ -333,18 +414,18 @@ class PiSmoker(object):
                     self.NextProgram()
 
             elif P['trigger'] == 'MeatTemp':
-                if self.Temps[-1][2] > float(P['triggerValue']):
+                if self.Temps[-1]['meat'] > float(P['triggerValue']):
                     self.NextProgram()
 
     def NextProgram(self):
-        logger.info('Advancing to next program')
+        _logger.info('Advancing to next program')
         self.Program.pop(0)  # Remove current program
 
         self.db.WriteProgram(self.Program)
         if len(self.Program) > 0:
             self.ProcessProgram()
         else:
-            logger.info('Last program reached, disabling program')
+            _logger.info('Last program reached, disabling program')
             self.Parameters['program'] = False
             self.WriteParameters()
 
@@ -361,7 +442,7 @@ class PiSmoker(object):
             self.WriteParameters()
 
         else:
-            logger.info('Last program reached, disabling program')
+            _logger.info('Last program reached, disabling program')
             self.Parameters['program'] = False
             self.WriteParameters()
 
@@ -371,10 +452,6 @@ class PiSmoker(object):
 
 
 def main(*args, **kwargs):
-    # Start logging
-    config.fileConfig('/home/pi/PiSmoker/logging.conf')
-    logger = getLogger('PiSmoker')
-
     # Initialize Probes
     grill_ADC = MAX31865(bus=_BUS, cs=_MAX_CS, R_ref=4000.)
     ADS_ADC = ADS1118(bus=_BUS, cs=_ADS_CS)
@@ -385,17 +462,20 @@ def main(*args, **kwargs):
     meat1_probe = TemperatureProbe(THERMOCOUPLE, read_fn=ADS_ADC.read, read_fn_kwargs={'channel': meat1_channel},
                                    read_cj_fn=ADS_ADC.read_its, temp_in_F=True)
     firebox_probe = TemperatureProbe(THERMOCOUPLE, read_fn=ADS_ADC.read, read_fn_kwargs={'channel': firebox_channel},
-                                   read_cj_fn=ADS_ADC.read_its, temp_in_F=True)
-    Probes = {'grill': grill_probe,
-              'meat':  meat1_probe,
+                                     read_cj_fn=ADS_ADC.read_its, temp_in_F=True)
+    Probes = {'grill':   grill_probe,
+              'meat':    meat1_probe,
               'firebox': firebox_probe}
 
     # Start firebase
-    f = open('/home/pi/PiSmoker/AuthToken.txt', 'r')
+    auth_file = '/home/pi/PiSmoker/AuthToken.txt'
+    if 'auth' in kwargs:
+        auth_file = kwargs['auth']
+    elif len(args) > 0:
+        auth_file = args[0]
+    f = open(auth_file, 'r')
     Secret = f.read()
     f.close()
-    Params = {'print': 'silent'}
-    Params = {'auth': Secret, 'print': 'silent'}  # ".write": "auth !== null"
     firebase_db = Firebase_Backend(FB_URL, Secret)
 
     # Initialize LCD
@@ -422,11 +502,11 @@ def main(*args, **kwargs):
     # Main Loop    #
     ###############
     sleep(5)  # Wait for clock to sync
-    retval = 0
+    _return_value = 1
     try:
         while 1:
             # Record temperatures
-            Smoker.RecordTemps(Probes)
+            Smoker.UpdateTemps(Probes)
 
             # Check for new parameters
             Smoker.UpdateParameters()
@@ -442,18 +522,17 @@ def main(*args, **kwargs):
 
             sleep(0.05)
     except KeyboardInterrupt:
+        _return_value = 0
         pass
-    except:
-        retval = 1
     finally:
         for relay in Smoker.relays:
             # Shutdown all relays if possible.
             Smoker.G.SetState(relay_id=relay, state=False)
-        return retval
+        return _return_value
 
 
 if __name__ == '__main__':
     import sys
 
-    retval = main()
-    sys.exit(retval)
+    return_value = main()
+    sys.exit(return_value)
