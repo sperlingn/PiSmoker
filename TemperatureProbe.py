@@ -154,7 +154,7 @@ class Thermocouple(object):
 
         if self.type is 'K':
             # Special K-type corrections.
-            E += 0.1185976 * exp(-0.1183432e-3 * (Tc - 0.1269686e3) ^ 2)
+            E += 0.1185976 * exp(-0.1183432e-3 * (Tc - 0.1269686e3) ** 2)
 
         return E * 1000.  # Units of NIST ITS-90 are mV
 

@@ -46,7 +46,9 @@ class ADS1118(object):
 
     __dr = 128
     __gain = 2.048
+    __cgain = None  # type: dict
     __channel = '01'
+    __channels = None  # type: list
     __mode = True  # Single Shot
     __its = False  # Read from internal temperature sensor
     __pu = False  # Internal pull up disable
@@ -68,6 +70,9 @@ class ADS1118(object):
         """
         self.__cs = cs
         self.__bus = bus
+
+        self.__channels = _channel_bits.keys()
+        self.__cgain = {channel: None for channel in self.__channels}
 
         if kwargs['speed']:
             self.setup_spi(speed=kwargs['speed'])
@@ -136,25 +141,10 @@ class ADS1118(object):
         else:
             self.__channel = channel
 
-        if max_v is None:
-            max_v = self.__gain
+        if max_v is not None:
+            self.set_gain(max_v, channel)
 
-        if max_v not in _gain_bits:
-            try:
-                for dev_gain in _gains:
-                    if abs(max_v) > dev_gain:
-                        continue
-                    else:
-                        max_v = dev_gain
-                        self.__gain = max_v
-                        break
-
-            except TypeError:
-                # We were given a bad gain, just go to max range
-                max_v = _gains[-1]
-                self.__gain = max_v
-        else:
-            self.__gain = max_v
+        gain = self.__cgain[channel] or self.__gain
 
         if dr is None:
             dr = self.__dr
@@ -200,7 +190,7 @@ class ADS1118(object):
 
         MSB = (((ss & 0b1) << 7) |  # Single-shot execute
                (_channel_bits[channel] << 4) |  # Channel setting
-               (_gain_bits[max_v] << 1) |  # Gain setting
+               (_gain_bits[gain] << 1) |  # Gain setting
                (mode & 0b1))  # Sampling Mode
         LSB = ((_dr_bits[dr] << 5) |  # Sampling rate
                ((its & 0b1) << 4) |  # Internal Temperature Sensor enable
@@ -212,6 +202,24 @@ class ADS1118(object):
             self.__last_cmd = [MSB, LSB]
             self.__spi.xfer2(self.__last_cmd)
             time.sleep(1.2 / dr)  # Wait at least 1.2 * sample time to ensure data is ready
+
+    def set_gain(self, new_gain, channel=None):
+        new_gain = abs(new_gain)
+        if new_gain not in _gain_bits:
+            try:
+                for dev_gain in _gains:
+                    if new_gain <= dev_gain:
+                        new_gain = dev_gain
+                        break
+
+            except TypeError:
+                # We were given a bad gain, just go to max range
+                new_gain = _gains[-1]
+
+        if channel is None:
+            self.__gain = new_gain
+        else:
+            self.__cgain[channel] = new_gain
 
     def _raw_read(self):
         """ Read and return direct ADC value (appropriately signed).
@@ -225,7 +233,7 @@ class ADS1118(object):
         ADC = (reading[0] << 8) + reading[1]  # Shift MSB up 8 bits, add to LSB
         if (reading[0] & (0b1 << 7)) != 0:
             # Reading is negative (two's compliment)
-            ADC -= (0b1 << 8)
+            ADC -= 65536  # (0b1 << 16)
 
         return ADC
 
@@ -239,7 +247,6 @@ class ADS1118(object):
         @return: ADC Voltage
         @rtype: float
         """
-
         if its:
             # Because it takes time to switch inputs, have some sampling histeresis for the internal temperature sensor.
             now = time.time()
@@ -255,6 +262,8 @@ class ADS1118(object):
             kwargs.update(ss=True)
         if channel:
             kwargs.update(channel=channel)
+        else:
+            channel = self.__channel
         if its:
             kwargs.update(its=True)
         self.config(**kwargs)
@@ -262,22 +271,26 @@ class ADS1118(object):
         ADC = self._raw_read()
 
         # Calculate reading from gain or its scale if self._its is set.
+        gain = self.__cgain[channel] or self.__gain
         if self.__its:
             scale = 0.03125
         else:
-            scale = self.__gain / 65536.
+            scale = gain / 65536.
 
         v_in = ADC * scale
 
-        if self.__autoscale:
-            if abs(ADC) < ((2 ^ 15) * .8) and (self.__gain / 2) >= _gains[0]:
+        if self.__autoscale and not self.__its:
+            if abs(v_in) < gain * 0.4 and (gain / 2) >= _gains[0]:
                 # If we have autoscale option turned on, the voltage measured is less than 80% of the next range down,
                 #  and the next range down is possible, change the gain to the next possible range.
-                self.__gain /= 2
-            elif abs(ADC) > ((2 ^ 16) * .9) and (self.__gain * 2) <= _gains[-1]:
+                self.set_gain(gain / 2, channel)
+            elif abs(v_in) > gain * 0.9 and (gain * 2) <= _gains[-1]:
                 # If we have autoscale option turned on, the voltage measured is greater than 90% of the current range
                 #  and the next range up is possible, change the gain to the next possible range.
-                self.__gain *= 2
+                self.set_gain(gain * 2, channel)
+                if abs(ADC) >= 0x7fff:
+                    #  We have clipped the reading at this scale.  Remeasure and return the result.
+                    return self.read(channel)
 
         if self.__its:
             self.__last_its = v_in
