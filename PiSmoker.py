@@ -37,10 +37,9 @@ _logger = getLogger(__name__)
 class Temperature_Record(deque):
     _average = None
 
-    def __init__(self, *args, **kwargs):
-        super(Temperature_Record, self).__init__(*args, **kwargs)
-        if len(self) > 0:
-            self._update_average()
+    def __init__(self, iterable=(), maxlen=None):
+        super(Temperature_Record, self).__init__(iterable, maxlen)
+        self._update_average()
 
     def _update_average(self):
         if len(self) > 0:
@@ -137,7 +136,6 @@ class PiSmoker_Parameters(dict):
 
 class PiSmoker(object):
     Parameters = None  # type: PiSmoker_Parameters
-    TempRecord = 60  # Period to record temperatures in memory
     db = None  # type: PiSmoker_Backend
     G = None  # type: Traeger
     Program = []
@@ -181,7 +179,7 @@ class PiSmoker(object):
         self.Control = PID(self.Parameters['PB'], self.Parameters['Ti'], self.Parameters['Td'])
         self.Control.setTarget(self.Parameters['target'])
 
-        self.Temps = Temperature_Record()
+        self.Temps = Temperature_Record(self.Temps, maxlen=int(self.Parameters['CycleTime'] / TEMP_INTERVAL))
         # Set mode
         self.ModeUpdated()
 
@@ -199,13 +197,6 @@ class PiSmoker(object):
             Ts.update({probe: probe_list[probe].read() for probe in probe_list})
             self.Temps.append(Ts)
             self.db.PostTemps(self.Parameters['target'], Ts)
-
-            # Clean up old temperatures
-            while len(self.Temps) > 0:
-                if now - self.Temps[0]['time'] < self.TempRecord:  # Still valid
-                    self.Temps.popleft()
-                else:
-                    break
 
             # Push temperatures to LCD
             self.qT.put(Ts)
@@ -252,6 +243,10 @@ class PiSmoker(object):
                     self.Parameters['LastReadProgram'] = time() - 10000
                     # TODO: Figure out reason for break after program
                     # break  # Stop processing new parameters - not sure why?
+            elif k == 'CycleTime':
+                if self.Parameters[k] != NewParameters[k]:
+                    self.Parameters[k] = NewParameters[k]
+                    self.Temps = Temperature_Record(self.Temps, maxlen=int(self.Parameters[k] / TEMP_INTERVAL))
 
     def GetAverageSince(self, startTime, probe='grill'):
         # TODO: Rolling average
@@ -357,9 +352,8 @@ class PiSmoker(object):
             self.CheckIgniter()
 
         # Auger currently off AND TimeSinceToggle > Auger Off Time
-        if (not self.G.GetState('auger')) and (time() - self.G.ToggleTime['auger']) > self.Parameters[
-            'CycleTime'] * (
-                    1 - self.Parameters['u']):
+        if (not self.G.GetState('auger')) and (time() - self.G.ToggleTime['auger']) > self.Parameters['CycleTime'] * \
+                (1 - self.Parameters['u']):
             self.G.SetState('auger', True)
             self.CheckIgniter()
             self.WriteParameters()
@@ -381,8 +375,7 @@ class PiSmoker(object):
 
     def DoControl(self):
         if (time() - self.Control.LastUpdate) > self.Parameters['CycleTime']:
-            Avg = self.GetAverageSince(self.Control.LastUpdate)
-            self.Parameters['u'] = min(max(self.Control.update(Avg), U_MIN), U_MAX)
+            self.Parameters['u'] = min(max(self.Control.update(self.Temps.average()['grill']), U_MIN), U_MAX)
             _logger.info('u %f', self.Parameters['u'])
 
             # Post control state
