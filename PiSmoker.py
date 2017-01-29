@@ -21,12 +21,19 @@ STARTUP_TEMP = 115
 SHUTDOWN_TIME = 10 * 60  # Time to run fan after shutdown
 TEMP_INTERVAL = 3  # Frequency to record temperatures
 
+_MEAT1_CHANNEL = '01'
+_FIREBOX_CHANNEL = '23'
 
 _BUS = 1
 _MAX_CS = 0
 _ADS_CS = 1
 _MCS_CS = 2
-_RELAYS = {'auger': None, 'fan': None, 'igniter': None}  # BCM
+# BCM GPIOs in use (TODO: Get from HAT)
+# GPIO 2: Igniter
+# GPIO 3: Blower
+# GPIO 4: Spare
+# GPIO 5: Auger
+_RELAYS = {'auger': 5, 'fan': 3, 'igniter': 2}  # BCM
 
 # Start logging
 config.fileConfig('/home/pi/PiSmoker/logging.conf')
@@ -448,13 +455,11 @@ def main(*args, **kwargs):
     # Initialize Probes
     grill_ADC = MAX31865(bus=_BUS, cs=_MAX_CS, R_ref=4000.)
     ADS_ADC = ADS1118(bus=_BUS, cs=_ADS_CS)
-    meat1_channel = '01'
-    firebox_channel = '23'
 
     grill_probe = TemperatureProbe(RTD, read_fn=grill_ADC.read(), temp_in_F=True)
-    meat1_probe = TemperatureProbe(THERMOCOUPLE, read_fn=ADS_ADC.read, read_fn_kwargs={'channel': meat1_channel},
+    meat1_probe = TemperatureProbe(THERMOCOUPLE, read_fn=ADS_ADC.read, read_fn_kwargs={'channel': _MEAT1_CHANNEL},
                                    read_cj_fn=ADS_ADC.read_its, temp_in_F=True)
-    firebox_probe = TemperatureProbe(THERMOCOUPLE, read_fn=ADS_ADC.read, read_fn_kwargs={'channel': firebox_channel},
+    firebox_probe = TemperatureProbe(THERMOCOUPLE, read_fn=ADS_ADC.read, read_fn_kwargs={'channel': _FIREBOX_CHANNEL},
                                      read_cj_fn=ADS_ADC.read_its, temp_in_F=True)
     Probes = {'grill':   grill_probe,
               'meat':    meat1_probe,
