@@ -1,5 +1,6 @@
 import logging.config
-import spidev
+from BB_SPI import SpiDev
+#from spidev import SpiDev
 import time
 
 # Start logging
@@ -39,12 +40,11 @@ _ITS_SAMPLE_TIME = 60
 
 # noinspection PyPackageRequirements,SpellCheckingInspection
 class ADS1118(object):
-    V_ref = 0.  # @param R_ref: Reference Voltage
     __cs = None  # @param cs: Chip select number
     __bus = None  # @param bus: SPI bus to be used
     __spi = None  # @type spi: spidev
 
-    __dr = 128
+    __dr = 860
     __gain = 2.048
     __cgain = None  # type: dict
     __channel = '01'
@@ -53,13 +53,13 @@ class ADS1118(object):
     __its = False  # Read from internal temperature sensor
     __pu = False  # Internal pull up disable
 
-    __autoscale = False
+    __autoscale = True
 
     __last_cmd = []
     __last_its = 0.
-    __last_its_time = None
+    __last_its_time = 0
 
-    def __init__(self, bus=0, cs=0, **kwargs):
+    def __init__(self, bus=0, cs=0, mode=0b01, **kwargs):
         """
 
         @param cs: Chip Select
@@ -74,18 +74,18 @@ class ADS1118(object):
         self.__channels = _channel_bits.keys()
         self.__cgain = {channel: None for channel in self.__channels}
 
-        if kwargs['speed']:
+        if 'speed' in kwargs:
             self.setup_spi(speed=kwargs['speed'])
         else:
-            self.setup_spi(speed=61000)
+            self.setup_spi(speed=4e6, mode=mode)
 
         self.config(**kwargs)
 
-    def setup_spi(self, speed=7629):
+    def setup_spi(self, speed=4e6, mode=0b01):
         """Set up the SPI bus for the parameters set.
 
         @param speed: Max SPI speed in Hz
-        @type speed: int
+        @type speed: float
         @return: None
         @rtype: None
         """
@@ -96,11 +96,11 @@ class ADS1118(object):
         if speed > 4e6:
             raise TypeError("ADS1118 max SPI clock is 4MHz.")
 
-        self.__spi = spidev.SpiDev()
+        self.__spi = SpiDev()
         self.__spi.open(self.__bus, self.__cs)
         self.__spi.max_speed_hz = speed
         # Datasheet indicates mode must be CPOL=0, CPHA=1 (i.e. mode 1)
-        self.__spi.mode = 0b01
+        self.__spi.mode = mode
 
     # noinspection PyIncorrectDocstring
     def config(self, ss=False, channel=None, max_v=None, mode=None, dr=None, its=None, pu=None, **kwargs):
@@ -197,11 +197,15 @@ class ADS1118(object):
                ((pu & 0b1) << 3) |  # Pullup resistor status
                0b011)  # Valid config + reserved bit
 
-        if self.__last_cmd != [MSB, LSB] or ss:
+        if self.__last_cmd != [MSB, LSB, 0, 0] or ss:
             # Configuration has changed, or we want a singleshot measurement.
-            self.__last_cmd = [MSB, LSB]
-            self.__spi.xfer2(self.__last_cmd)
-            time.sleep(1.2 / dr)  # Wait at least 1.2 * sample time to ensure data is ready
+            self.__last_cmd = [MSB, LSB, 0, 0]
+            # self.__spi.mode = 0b11
+            result = self.__spi.xfer2(self.__last_cmd)
+            assert result[2] | ((ss & 0b1) << 7) == MSB
+            assert result[3] | 0b1 == LSB
+            # self.__spi.mode = 0b01
+            time.sleep(.5)  # Wait at least 1.2 * sample time to ensure data is ready
 
     def set_gain(self, new_gain, channel=None):
         new_gain = abs(new_gain)
@@ -229,11 +233,11 @@ class ADS1118(object):
         """
 
         # Clock out two bytes, holding MOSI/DIN low.
-        reading = self.__spi.xfer2([0x00, 0x00])
-        ADC = (reading[0] << 8) + reading[1]  # Shift MSB up 8 bits, add to LSB
+        reading = self.__spi.xfer2([0x00, 0x00, 0x00, 0x00])
+        ADC = (reading[0] << 7) + reading[1]  # Shift MSB up 8 bits, add to LSB
         if (reading[0] & (0b1 << 7)) != 0:
             # Reading is negative (two's compliment)
-            ADC -= 65536  # (0b1 << 16)
+            ADC -= 32768  # (0b1 << 15)
 
         return ADC
 
@@ -264,22 +268,21 @@ class ADS1118(object):
             kwargs.update(channel=channel)
         else:
             channel = self.__channel
-        if its:
-            kwargs.update(its=True)
+        kwargs.update(its=bool(its))
         self.config(**kwargs)
 
         ADC = self._raw_read()
 
         # Calculate reading from gain or its scale if self._its is set.
         gain = self.__cgain[channel] or self.__gain
-        if self.__its:
+        if its:
             scale = 0.03125
         else:
             scale = gain / 65536.
 
         v_in = ADC * scale
 
-        if self.__autoscale and not self.__its:
+        if self.__autoscale and not its:
             if abs(v_in) < gain * 0.4 and (gain / 2) >= _gains[0]:
                 # If we have autoscale option turned on, the voltage measured is less than 80% of the next range down,
                 #  and the next range down is possible, change the gain to the next possible range.
@@ -292,7 +295,7 @@ class ADS1118(object):
                     #  We have clipped the reading at this scale.  Remeasure and return the result.
                     return self.read(channel)
 
-        if self.__its:
+        if its:
             self.__last_its = v_in
 
         return v_in

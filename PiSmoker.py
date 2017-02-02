@@ -12,6 +12,8 @@ from PiSmoker_Backend import PiSmoker_Backend
 from TemperatureProbe import TemperatureProbe, RTD, THERMOCOUPLE
 from Traeger import Traeger
 
+SMOKER_AUTH_TOKEN_TXT = '/home/pi/PiSmoker/AuthToken.txt'
+
 FB_URL = 'https://pismoker.firebaseio.com/'
 PIDCycleTime = 20  # Frequency to update control loop
 U_MIN = 0.15  # Maintenance level
@@ -127,18 +129,18 @@ class PiSmoker_Parameters(dict):
     """
     Modification of dict class to implement on_update callbacks
     """
-    __setter_cb = None  # Signature:
+    _setter_cb = None  # Signature:
 
-    def __init__(self, __setter_callback=None, *args, **kwargs):
+    def __init__(self, setter_cb=None, *args, **kwargs):
         super(PiSmoker_Parameters, self).__init__(*args, **kwargs)
 
-        if __setter_callback:
-            self._set_cb = __setter_callback
+        if setter_cb:
+            self._setter_cb = setter_cb
 
     def __setitem__(self, key, value):
         super(PiSmoker_Parameters, self).__setitem__(key, value)
-        if self.__setter_cb:
-            self.__setter_cb(key, value)
+        if self._setter_cb:
+            self._setter_cb(key, value)
 
 
 class PiSmoker(object):
@@ -159,10 +161,9 @@ class PiSmoker(object):
         @param relays: [Optional]Dictionary of relay names and GPIO pins
         @type relays: dict
         """
-        self.Parameters = PiSmoker_Parameters(
+        self.Parameters = PiSmoker_Parameters(self.ParameterUpdateCallback,
                 {'mode':  'Off', 'target': 225, 'PB': 60.0, 'Ti': 180.0, 'Td': 45.0, 'CycleTime': PIDCycleTime,
-                 'u': U_MIN, 'PMode': 2.0, 'program': False, 'ProgramToggle': time()},
-                __setter_callback__=self.ParameterUpdateCallback)  # 60,180,45 held +- 5F
+                 'u': U_MIN, 'PMode': 2.0, 'program': False, 'ProgramToggle': time()})  # 60,180,45 held +- 5F
         # Initialize Traeger Object
         if relays:
             self.relays = relays
@@ -186,7 +187,7 @@ class PiSmoker(object):
         self.Control = PID(self.Parameters['PB'], self.Parameters['Ti'], self.Parameters['Td'])
         self.Control.setTarget(self.Parameters['target'])
 
-        self.Temps = Temperature_Record(self.Temps, maxlen=int(self.Parameters['CycleTime'] / TEMP_INTERVAL))
+        self.Temps = Temperature_Record(maxlen=int(self.Parameters['CycleTime'] / TEMP_INTERVAL))
         # Set mode
         self.ModeUpdated()
 
@@ -203,10 +204,11 @@ class PiSmoker(object):
             Ts = {'time': now}
             Ts.update({probe: probe_list[probe].read() for probe in probe_list})
             self.Temps.append(Ts)
+            _logger.info("Temps: %r" % self.Temps[-1])
             self.db.PostTemps(self.Parameters['target'], Ts)
 
             # Push temperatures to LCD
-            self.qT.put(Ts)
+            #self.qT.put(Ts)
 
     def readLCD(self):
         NewParameters = {}
@@ -230,11 +232,11 @@ class PiSmoker(object):
             # TODO: Figure out reason for break after program
             # break  # Stop processing new parameters - not sure why?
         # Write parameters back after all changes have been handled.
-        self.WriteParameters()
+        self.db.WriteParameters(self.Parameters)
 
     def UpdateParameters(self):
         # Loop through each key, see what changed
-        NewParameters = self.db.ReadParameters()
+        NewParameters = self.db.ReadParameters() or {}
         NewParameters.update(self.readLCD())
         for k in NewParameters.keys():
             _logger.info('New self.Parameters: %s -- %r (%r)', k, float(NewParameters[k]), self.Parameters[k])
@@ -253,7 +255,7 @@ class PiSmoker(object):
             elif k == 'CycleTime':
                 if self.Parameters[k] != NewParameters[k]:
                     self.Parameters[k] = NewParameters[k]
-                    self.Temps = Temperature_Record(self.Temps, maxlen=int(self.Parameters[k] / TEMP_INTERVAL))
+                    self.Temps = Temperature_Record(self.Temps or (), maxlen=int(self.Parameters[k] / TEMP_INTERVAL))
 
     def GetAverageSince(self, startTime, probe='grill'):
         # TODO: Rolling average
@@ -430,21 +432,22 @@ class PiSmoker(object):
             self.WriteParameters()
 
     def ProcessProgram(self):
-        if len(self.Program) > 0:
-            self.Parameters['ProgramToggle'] = time()
+        if self.Program:
+            if len(self.Program) > 0:
+                self.Parameters['ProgramToggle'] = time()
 
-            P = self.Program[0]
-            self.Parameters['mode'] = P['mode']
-            self.ModeUpdated()
+                P = self.Program[0]
+                self.Parameters['mode'] = P['mode']
+                self.ModeUpdated()
 
-            self.Parameters['target'] = float(P['target'])
-            self.Control.setTarget(self.Parameters['target'])
-            self.WriteParameters()
+                self.Parameters['target'] = float(P['target'])
+                self.Control.setTarget(self.Parameters['target'])
+                self.WriteParameters()
 
-        else:
-            _logger.info('Last program reached, disabling program')
-            self.Parameters['program'] = False
-            self.WriteParameters()
+            else:
+                _logger.info('Last program reached, disabling program')
+                self.Parameters['program'] = False
+                self.WriteParameters()
 
     def SetProgram(self, Program):
         self.Program = Program
@@ -456,7 +459,7 @@ def main(*args, **kwargs):
     grill_ADC = MAX31865(bus=_BUS, cs=_MAX_CS, R_ref=4000.)
     ADS_ADC = ADS1118(bus=_BUS, cs=_ADS_CS)
 
-    grill_probe = TemperatureProbe(RTD, read_fn=grill_ADC.read(), temp_in_F=True)
+    grill_probe = TemperatureProbe(RTD, read_fn=grill_ADC.read, temp_in_F=True)
     meat1_probe = TemperatureProbe(THERMOCOUPLE, read_fn=ADS_ADC.read, read_fn_kwargs={'channel': _MEAT1_CHANNEL},
                                    read_cj_fn=ADS_ADC.read_its, temp_in_F=True)
     firebox_probe = TemperatureProbe(THERMOCOUPLE, read_fn=ADS_ADC.read, read_fn_kwargs={'channel': _FIREBOX_CHANNEL},
@@ -466,7 +469,7 @@ def main(*args, **kwargs):
               'firebox': firebox_probe}
 
     # Start firebase
-    auth_file = '/home/pi/PiSmoker/AuthToken.txt'
+    auth_file = SMOKER_AUTH_TOKEN_TXT
     if 'auth' in kwargs:
         auth_file = kwargs['auth']
     elif len(args) > 0:
@@ -480,17 +483,17 @@ def main(*args, **kwargs):
     qP = Queue()  # Queue for Parameters
     qT = Queue()  # Queue for Temps
     qR = Queue()  # Return for Parameters
-    qT.put([0, 0, 0])
-    lcd = LCDDisplay(qP, qT, qR)
-    lcd.setDaemon(True)
-    lcd.start()
+    qT.put({'time':0, 'grill': 0, 'meat1': 0})
+    #lcd = LCDDisplay(qP, qT, qR)
+    #lcd.setDaemon(True)
+    #lcd.start()
 
     ##############
     # Setup       #
     ##############
 
     # Default parameters
-    Smoker = PiSmoker(firebase_db)
+    Smoker = PiSmoker(firebase_db, qT=qT, qP=qP, qR=qR, relays=_RELAYS)
 
     # Setup variables
     # Parameters['LastReadProgram'] = time.time()
@@ -501,32 +504,32 @@ def main(*args, **kwargs):
     ###############
     sleep(5)  # Wait for clock to sync
     _return_value = 1
-    try:
-        while 1:
-            # Record temperatures
-            Smoker.UpdateTemps(Probes)
+    #try:
+    while 1:
+        # Record temperatures
+        Smoker.UpdateTemps(Probes)
 
-            # Check for new parameters
-            Smoker.UpdateParameters()
+        # Check for new parameters
+        Smoker.UpdateParameters()
 
-            # Check for new program
-            Smoker.ProcessProgram()
+        # Check for new program
+        Smoker.ProcessProgram()
 
-            # Evaluate triggers
-            Smoker.EvaluateTriggers()
+        # Evaluate triggers
+        Smoker.EvaluateTriggers()
 
-            # Do mode
-            Smoker.DoMode()
+        # Do mode
+        Smoker.DoMode()
 
-            sleep(0.05)
-    except KeyboardInterrupt:
-        _return_value = 0
-        pass
-    finally:
-        for relay in Smoker.relays:
-            # Shutdown all relays if possible.
-            Smoker.G.SetState(relay_id=relay, state=False)
-        return _return_value
+        sleep(0.05)
+    #except KeyboardInterrupt:
+    #    _return_value = 0
+    #    pass
+    #finally:
+    #    for relay in Smoker.relays:
+    #        # Shutdown all relays if possible.
+    #        Smoker.G.SetState(relay_id=relay, state=False)
+    #    return _return_value
 
 
 if __name__ == '__main__':

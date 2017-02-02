@@ -36,6 +36,8 @@ class LCDDisplay(Thread):
         self.qP = qP
         self.qT = qT
         self.qR = qR
+        self.Ts = {'time': 0, 'grill': 0, 'meat1': 0}
+        self.Parameters = {'target': 0, 'mode': '', 'PMode': ''}
 
         self.Display = ''
 
@@ -51,7 +53,7 @@ class LCDDisplay(Thread):
             sleep(0.05)
 
     def UpdateDisplay(self):
-        text = 'T%i G%i M%i'.ljust(16) % (self.Parameters['target'], self.Ts[1], self.Ts[2])
+        text = 'T%i G%i M%i'.ljust(16) % (self.Parameters['target'], self.Ts['grill'], self.Ts['meat1'])
         text += '\n'
         if self.Parameters['mode'] == 'Hold' or self.Parameters['mode'] == 'Start':
             text += '%s %3.2f   %s' % (self.Parameters['mode'].ljust(5), self.Parameters['u'], self.GetCurrentState())

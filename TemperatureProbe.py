@@ -145,18 +145,18 @@ class Thermocouple(object):
         E = 0
         # Gets index for coefs for which the NIST function is valid
         t_r = 0
-        while self.c2e_ranges[self.type][t_r] <= Tc and t_r < len(self.c2e_ranges[self.type]):
+        while t_r < len(self.c2e_ranges[self.type]) - 1 and self.c2e_ranges[self.type][t_r] <= Tc:
             t_r += 1
 
         # Recursive formulation of polynomial coefficient solution.
-        for a in range(len(self.c2e_coefs[self.type][t_r]) - 1, 0):
+        for a in range(len(self.c2e_coefs[self.type][t_r]) - 1, -1, -1):
             E = self.c2e_coefs[self.type][t_r][a] + Tc * E
 
         if self.type is 'K':
             # Special K-type corrections.
             E += 0.1185976 * exp(-0.1183432e-3 * (Tc - 0.1269686e3) ** 2)
 
-        return E * 1000.  # Units of NIST ITS-90 are mV
+        return E / 1000.  # Units of NIST ITS-90 are mV
 
     def e2c(self, E):
         """Convert reading in V to reading in C for Thermocouple type using NIST ITS-90 functions.
@@ -168,15 +168,15 @@ class Thermocouple(object):
         """
         Tc = 0.
 
-        E_mV = E / 1000.  # NIST ITS-90 data all computed in mV
+        E_mV = E * 1000.  # NIST ITS-90 data all computed in mV
 
         # Gets index for coefs for which the NIST function is valid
         e_r = 0
-        while self.e2c_ranges[self.type][e_r] <= E_mV and e_r < len(self.e2c_ranges[self.type]):
+        while e_r < len(self.e2c_ranges[self.type]) - 1 and self.e2c_ranges[self.type][e_r] <= E_mV:
             e_r += 1
 
         # Recursive formulation of polynomial coefficient solution.
-        for a in range(len(self.e2c_coefs[self.type][e_r]) - 1, 0):
+        for a in range(len(self.e2c_coefs[self.type][e_r]) - 1, -1, -1):
             Tc = self.e2c_coefs[self.type][e_r][a] + E_mV * Tc
 
         return Tc
@@ -256,11 +256,11 @@ class TemperatureProbe(object):
                     self.thermis_fn = partial(self.thermis_fn, thermis_fn_args)
         elif probe_type is RTD and subtype is not None:
             if subtype == 'PT100':
-                self.R_0 = _R_0_PT100
+                self.R_0_RTD = _R_0_PT100
             elif subtype == 'PT1000':
-                self.R_0 = _R_0_PT1000
+                self.R_0_RTD = _R_0_PT1000
             else:
-                self.R_0 = float(subtype)
+                self.R_0_RTD = float(subtype)
 
         if not callable(read_fn):
             assert callable(read_fn)
@@ -297,7 +297,7 @@ class TemperatureProbe(object):
 
     def rtd_conversion(self, R_T):
         # Use NIST RTD Linearization function.
-        Tc = (-_A_PT + sqrt(_A_PT * _A_PT - 4 * _B_PT * (1 - R_T / self.R_0))) / (2 * _B_PT)
+        Tc = (-_A_PT + sqrt(_A_PT * _A_PT - 4 * _B_PT * (1 - R_T / self.R_0_RTD))) / (2 * _B_PT)
         return Tc
 
     def read(self, temp_in_F=None):

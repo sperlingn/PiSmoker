@@ -22,8 +22,7 @@ class PiSmoker_Backend(object):
     def __init__(self, *args, **kwargs):
         raise NotImplementedError("Template class, must be implemented.")
 
-    @staticmethod
-    def PostTemps(target_temp, Ts):
+    def PostTemps(self, target_temp, Ts):
         """Expected to implement storing the temperatures in the backend.
         PiSmoker_Backend implementation
 
@@ -34,8 +33,8 @@ class PiSmoker_Backend(object):
         @return: Dictionary to store
         @rtype: dict
         """
-        T = {'time': Ts[0] * 1000, 'TT': target_temp}
-        T.update({'T%i' % i: t for (i, t) in enumerate(Ts[1:], 1)})
+        T = {'time': Ts['time'] * 1000, 'TT': target_temp}
+        T.update({'T%i' % i: Ts[k] for (i,k) in enumerate(Ts) if k != 'time'})
         return T
 
     def WriteParameters(self, Parameters):
